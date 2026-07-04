@@ -1,6 +1,6 @@
 {
   "name": "pi-continue",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "type": "module",
   "description": "Mid-turn continuation for long Pi tool runs: compact safely before context overflow, then resume the same session from a structured handoff ledger.",
   "keywords": [
@@ -52,7 +52,7 @@
     "extensions": [
       "./extensions/continue/index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/Tiziano-AI/pi-continue/v0.8.2/assets/gallery/pi-continue-gallery.webp"
+    "image": "https://raw.githubusercontent.com/Tiziano-AI/pi-continue/v0.9.0/assets/gallery/pi-continue-gallery.webp"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.74.0",
