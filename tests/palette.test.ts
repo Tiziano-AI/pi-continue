@@ -104,6 +104,8 @@ test("ContinuePaletteComponent keeps Unicode focus text and rejects CSI-u contro
 	}, () => {});
 	component.handleInput("f");
 	for (const char of "测试🙂é") component.handleInput(char);
+	component.handleInput("\u001b[57447;2u");
+	component.handleInput("\ufdd0");
 	component.handleInput("\u001b[133;1u");
 	component.handleInput("\u001b[9;1u");
 	component.handleInput("enter");

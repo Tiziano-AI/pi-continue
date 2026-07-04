@@ -227,6 +227,27 @@ test("Continuation Ledger overlay fire-and-forget display reports open failures"
 	assert.deepEqual(reasons, ["Continuation Ledger could not open."]);
 });
 
+test("showLatestContinuationLedger reports manual overlay lifecycle failures", async () => {
+	const notifications = [];
+	const ctx = {
+		hasUI: true,
+		ui: {
+			custom(factory) {
+				factory({ requestRender() {} }, theme, {}, () => {});
+				return Promise.reject(new Error("open failed"));
+			},
+			notify(message, level) {
+				notifications.push({ message, level });
+			},
+		},
+	};
+	const overlay = createContinuationLedgerOverlayController();
+	await showLatestContinuationLedger(ctx, { eventId: "continue-1", compactionEntryId: "compact-1", content: "ledger", capturedAt: 0 }, overlay);
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.deepEqual(notifications, [{ message: "Continuation Ledger could not open.", level: "warning" }]);
+});
+
 test("ContinuationLedgerOverlay renders scrollable ledger panel", () => {
 	let closed = false;
 	let renders = 0;
