@@ -86,6 +86,30 @@ test("ContinuePaletteComponent captures optional focus from the focus screen", (
 	assert.equal(renders, "finish tests".length + 1);
 });
 
+test("ContinuePaletteComponent opens focus mode with CSI-u base-layout f shortcut", () => {
+	let selected;
+	const component = new ContinuePaletteComponent(createSnapshot(), theme, (result) => {
+		selected = result;
+	}, () => {});
+	component.handleInput("\u001b[1092::102;1u");
+	for (const char of "via key identity") component.handleInput(char);
+	component.handleInput("enter");
+	assert.deepEqual(selected, { kind: "continue", mode: "steer", instructions: "via key identity" });
+});
+
+test("ContinuePaletteComponent keeps Unicode focus text and rejects CSI-u controls", () => {
+	let selected;
+	const component = new ContinuePaletteComponent(createSnapshot(), theme, (result) => {
+		selected = result;
+	}, () => {});
+	component.handleInput("f");
+	for (const char of "测试🙂é") component.handleInput(char);
+	component.handleInput("\u001b[133;1u");
+	component.handleInput("\u001b[9;1u");
+	component.handleInput("enter");
+	assert.deepEqual(selected, { kind: "continue", mode: "steer", instructions: "测试🙂é" });
+});
+
 test("ContinuePaletteComponent captures queue and preview focus actions", () => {
 	const queueResults = [];
 	const queueComponent = new ContinuePaletteComponent(createSnapshot(), theme, (result) => {
@@ -119,6 +143,18 @@ test("ContinuePaletteComponent backs out of focus mode without saving hidden tex
 	for (const char of "do not keep") component.handleInput(char);
 	component.handleInput("escape");
 	component.handleInput("enter");
+	assert.deepEqual(selected, { kind: "continue", mode: "steer", instructions: undefined });
+});
+
+test("ContinuePaletteComponent handles Pi TUI escape and enter key events", () => {
+	let selected;
+	const component = new ContinuePaletteComponent(createSnapshot(), theme, (result) => {
+		selected = result;
+	}, () => {});
+	component.handleInput("f");
+	for (const char of "do not keep") component.handleInput(char);
+	component.handleInput("\u001b[27;1u");
+	component.handleInput("\u001b[13;1u");
 	assert.deepEqual(selected, { kind: "continue", mode: "steer", instructions: undefined });
 });
 

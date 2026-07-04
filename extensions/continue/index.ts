@@ -23,7 +23,7 @@ import {
 } from "./src/continuation-event.ts";
 import { buildContinuationDetails, buildContinuationSynthesisTelemetry, parseContinuationDetails } from "./src/details.ts";
 import { SYNTHESIS_ABORT_MESSAGE } from "./src/synthesis-error.ts";
-import { buildLedgerSnapshot, showContinuationLedgerOverlaySoon } from "./src/ledger-viewer.ts";
+import { buildLedgerSnapshot, createContinuationLedgerOverlayController } from "./src/ledger-viewer.ts";
 import { runMidRunGuard } from "./src/mid-run-guard.ts";
 import { PromptPassError, runPromptPass } from "./src/model.ts";
 import { loadPiInternals } from "./src/pi-internals.ts";
@@ -94,6 +94,7 @@ function normalizeSynthesisFailure(error: unknown): ContinuationSynthesisFailure
 export default function (pi: ExtensionAPI) {
 	const pendingOutputWrites = new Map<string, PendingOutputWrite>();
 	const runtime = createContinuationRuntimeState();
+	const ledgerOverlay = createContinuationLedgerOverlayController();
 
 	function cleanupPendingOutputWrites(eventId: string): void {
 		let removed = false;
@@ -114,7 +115,9 @@ export default function (pi: ExtensionAPI) {
 			if (shouldOpenContinuePalette(args, ctx.hasUI)) {
 				const palette = await showContinuePalette(pi, ctx, runtime);
 				if (palette.supported) {
-					if (palette.result) await runContinuePaletteResult(pi, ctx, runtime, palette.result, (eventId) => cleanupPendingOutputWrites(eventId));
+					if (palette.result) {
+						await runContinuePaletteResult(pi, ctx, runtime, ledgerOverlay, palette.result, (eventId) => cleanupPendingOutputWrites(eventId));
+					}
 					return;
 				}
 			}
@@ -124,7 +127,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (subcommand?.name === "ledger") {
-				await runLedgerCommand(ctx, runtime);
+				await runLedgerCommand(ctx, runtime, ledgerOverlay);
 				return;
 			}
 			if (subcommand?.name === "settings") {
@@ -367,7 +370,7 @@ export default function (pi: ExtensionAPI) {
 			const projectContext = await resolveProjectContext(pi, ctx.cwd, ctx.sessionManager.getSessionId());
 			const config = loadContinuationConfig(projectContext.projectRoot);
 			if (config.enabled && config.showAfterCompact) {
-				showContinuationLedgerOverlaySoon(ctx, ledger, (reason) => {
+				ledgerOverlay.showSoon(ctx, ledger, (reason) => {
 					if (ctx.hasUI) ctx.ui.notify(`Could not open Continuation Ledger: ${reason}`, "error");
 				});
 			}
@@ -406,6 +409,7 @@ export default function (pi: ExtensionAPI) {
 		abandonActiveContinuationEvent(runtime, "Pi session shut down before continuation finished settling.");
 		pendingOutputWrites.clear();
 		clearWorkingVisuals(ctx, runtime);
+		ledgerOverlay.clear();
 		runtime.compactionRunning = false;
 		runtime.guardFailureKey = undefined;
 		clearResumeStartTimeout(runtime);

@@ -88,7 +88,7 @@ Configure the threshold directly in Pi settings, or choose `Handoff trigger` in 
 
 `reserveTokens` and `keepRecentTokens` are absolute token counts. For a 272K context model, an explicit `reserveTokens: 68000` triggers near 75 percent usage. The `/continue settings` control shows and edits the human trigger token count, then saves Pi's canonical `compaction.reserveTokens` value at the selected settings scope; the trigger is not stored in `pi-continue.json`. See [`examples/pi-settings-compaction-75pct-272k.json`](examples/pi-settings-compaction-75pct-272k.json).
 
-Use `/continue status` after a continuation to see what happened. Status reports the latest local run: how the handoff started, whether the Continuation Ledger was created, whether Pi reported package-owned `pi-continue/v4` handoff proof, which summarizer model ran, the requested and effective history output budget, whether the model max-output cap clamped that budget, whether the resume request was sent, whether the resumed assistant turn completed, whether continuation-artifact or agent-guide output writes updated anything, and what to do next. If the resumed assistant requests tools, status remains in resume-running state while that tool-use loop is still live; `toolUse` alone is not treated as completion. A later completed assistant/tool-result checkpoint can start the next automatic continuation as a chained handoff when the context is still over threshold, otherwise the resume clears when a terminal assistant outcome (`stop`, `length`, `aborted`, or failure) is observed. UI sessions can also show the latest Continuation Ledger as a temporary panel; this never appends another transcript entry. Failure states use explicit package messages rather than parsing provider error text.
+Use `/continue status` after a continuation to see what happened. Status reports the latest local run: how the handoff started, whether the Continuation Ledger was created, whether Pi reported package-owned `pi-continue/v4` handoff proof, which summarizer model ran, the requested and effective history output budget, whether the model max-output cap clamped that budget, whether the resume request was sent, whether the resumed assistant turn completed, whether continuation-artifact or agent-guide output writes updated anything, and what to do next. If the resumed assistant requests tools, status remains in resume-running state while that tool-use loop is still live; `toolUse` alone is not treated as completion. A later completed assistant/tool-result checkpoint can start the next automatic continuation as a chained handoff when the context is still over threshold, otherwise the resume clears when a terminal assistant outcome (`stop`, `length`, `aborted`, or failure) is observed. UI sessions can also show the latest Continuation Ledger as a temporary panel; repeated displays reuse and focus the same panel with the latest ledger instead of stacking overlays, and this never appends another transcript entry. Failure states use explicit package messages rather than parsing provider error text.
 
 A model's context window and maximum output budget are independent. `pi-continue` derives the history budget from Pi's reserve-token setting or `historyMaxTokens`, then clamps the provider request to the selected summarizer model's positive max-output limit when that limit is known.
 
@@ -144,7 +144,7 @@ Common settings:
 | `appendReadFileTags` | `false` by default; when true, appends current compaction read-file tags. |
 | `appendModifiedFileTags` | `true` by default; when true, appends current compaction modified-file tags. |
 | `promptOverridePolicy` | Chooses project overrides, global overrides, or package defaults. |
-| `showAfterCompact` | `true` by default; surfaces the rendered brief in a temporary TUI panel right after each successful extension-owned compaction. Set `false` for a silent handoff. |
+| `showAfterCompact` | `true` by default; surfaces the rendered brief in a temporary TUI panel right after each successful extension-owned compaction. Repeated displays update and focus the latest panel instead of stacking overlays. Set `false` for a silent handoff. |
 
 `/continue settings` also includes a handoff trigger control. It shows one human-facing trigger token count and writes Pi core `compaction.reserveTokens` in `.pi/settings.json` or the global Pi settings file, not a package config key.
 
@@ -223,7 +223,7 @@ What can change:
 
 - `continuationArtifactMode: "always"` writes the rendered brief under `.pi/continue/` after successful extension-owned compaction.
 - `continuationArtifactMode: "off"` writes no continuation artifact.
-- `showAfterCompact: true` (default) surfaces the rendered brief in a TUI overlay right after compaction completes; set `false` for a silent handoff.
+- `showAfterCompact: true` (default) surfaces the rendered brief in a TUI overlay right after compaction completes and reuses the latest panel for repeated displays; set `false` for a silent handoff.
 - `agentGuideSyncMode: "off"` is the default.
 - `agentGuideSyncMode: "always"` writes only a full non-null `agentGuideUpdate.content` replacement to the configured agent-guide path.
 - Writes are normalized and skipped when content is unchanged.
