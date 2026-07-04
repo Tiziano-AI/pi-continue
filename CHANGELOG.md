@@ -15,7 +15,9 @@ All notable changes to `pi-continue` are documented here.
 ### Fixed
 
 - Allowed CSI-u Escape/Enter and key-identity shortcuts to close overlays and open `/continue` focus notes reliably, including layouts where the physical `f` shortcut does not decode as printable `f`.
+- Filtered modifier-only Kitty/CSI-u private-use input and Unicode non-characters out of focus notes while preserving normal Unicode text.
 - Added inactive overlay focus copy and dimmed chrome so users can tell when another panel owns keyboard focus.
+- Reported manual `/continue ledger` panel lifecycle failures with explicit UI warnings instead of silently accepting a failed overlay open.
 
 ## 0.8.2 - 2026-05-27
 

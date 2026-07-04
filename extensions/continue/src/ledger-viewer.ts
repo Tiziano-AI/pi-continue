@@ -23,7 +23,7 @@ interface TrackedLedgerOverlay {
 
 export interface ContinuationLedgerOverlayController {
 	clear(): void;
-	show(ctx: ExtensionContext, ledger: ContinuationLedgerSnapshot): Promise<boolean>;
+	show(ctx: ExtensionContext, ledger: ContinuationLedgerSnapshot, onLifecycleError?: () => void): Promise<boolean>;
 	showSoon(ctx: ExtensionContext, ledger: ContinuationLedgerSnapshot, onError: (reason: string) => void): void;
 }
 
@@ -140,7 +140,7 @@ export function createContinuationLedgerOverlayController(): ContinuationLedgerO
 		);
 		void lifecycle
 			.catch(() => {
-				if (activeLedgerOverlay === entry) onLifecycleError?.();
+				if (entry && activeLedgerOverlay === entry) onLifecycleError?.();
 			})
 			.finally(() => {
 				forgetLedgerOverlay(entry);
@@ -175,7 +175,15 @@ export async function showLatestContinuationLedger(
 		if (ctx.hasUI) ctx.ui.notify("No Continuation Ledger has been created in this session yet.", "warning");
 		return;
 	}
-	const shown = await overlay.show(ctx, ledger);
+	let shown = false;
+	try {
+		shown = await overlay.show(ctx, ledger, () => {
+			if (ctx.hasUI) ctx.ui.notify("Continuation Ledger could not open.", "warning");
+		});
+	} catch {
+		if (ctx.hasUI) ctx.ui.notify("Continuation Ledger could not open.", "warning");
+		return;
+	}
 	if (!shown && ctx.hasUI) {
 		ctx.ui.notify("Continuation Ledger cannot open in this Pi mode.", "warning");
 	}

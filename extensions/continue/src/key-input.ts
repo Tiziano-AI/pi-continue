@@ -54,6 +54,22 @@ const PALETTE_KEY_IDS: Record<PaletteKey, readonly KeyId[]> = {
 
 const CONTROL_CHAR_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 
+function isPrivateUseCodePoint(codePoint: number): boolean {
+	return (codePoint >= 0xe000 && codePoint <= 0xf8ff)
+		|| (codePoint >= 0xf0000 && codePoint <= 0xffffd)
+		|| (codePoint >= 0x100000 && codePoint <= 0x10fffd);
+}
+
+function isNonCharacterCodePoint(codePoint: number): boolean {
+	return (codePoint >= 0xfdd0 && codePoint <= 0xfdef)
+		|| (codePoint >= 0xfffe && (codePoint & 0xfffe) === 0xfffe);
+}
+
+function isPrintableTextScalar(codePoint: number): boolean {
+	if (codePoint >= 0xd800 && codePoint <= 0xdfff) return false;
+	return !isPrivateUseCodePoint(codePoint) && !isNonCharacterCodePoint(codePoint);
+}
+
 function splitInput(data: string): string[] {
 	const buffer = new StdinBuffer({ timeout: 1_000 });
 	const events: string[] = [];
@@ -102,12 +118,18 @@ function isRawPrintableText(data: string): string | undefined {
 	if (data.length === 0) return undefined;
 	if (data.includes("\u001b")) return undefined;
 	if (CONTROL_CHAR_PATTERN.test(data)) return undefined;
+	for (const character of data) {
+		const codePoint = character.codePointAt(0);
+		if (codePoint === undefined || !isPrintableTextScalar(codePoint)) return undefined;
+	}
 	return data;
 }
 
 export function palettePrintableInput(data: string): string | undefined {
 	const direct = printableEvent(data);
 	if (direct !== undefined) return direct;
+	const rawDirect = isRawPrintableText(data);
+	if (rawDirect !== undefined) return rawDirect;
 	let output = "";
 	for (const event of splitInput(data)) {
 		const printable = printableEvent(event);
