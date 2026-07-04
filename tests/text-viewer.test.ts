@@ -11,6 +11,21 @@ const theme = {
 	},
 };
 
+const colorTheme = {
+	fg(color, text) {
+		const code = {
+			accent: "\u001b[36m",
+			border: "\u001b[34m",
+			dim: "\u001b[2m",
+			muted: "\u001b[90m",
+		}[color];
+		return `${code}${text}\u001b[0m`;
+	},
+	bold(text) {
+		return text;
+	},
+};
+
 function renderedBody(overlay) {
 	return overlay.render(80).join("\n");
 }
@@ -20,6 +35,24 @@ test("sanitizeOverlayText strips terminal controls", () => {
 		sanitizeOverlayText("\u001b]2;title\u0007\u001b[31mred\u001b[0m\r\nline\u0000two"),
 		"red\nlinetwo",
 	);
+});
+
+test("ScrollableTextOverlay dims border and explains when focus is elsewhere", () => {
+	const overlay = new ScrollableTextOverlay(
+		{ title: "preview", content: "body" },
+		colorTheme,
+		() => {},
+		() => {},
+	);
+	const unfocused = renderedBody(overlay);
+	assert.match(unfocused, /\u001b\[90m\+\u001b\[0m/);
+	assert.match(unfocused, /Inactive: focus this panel to scroll or close/);
+
+	overlay.focused = true;
+	const focused = renderedBody(overlay);
+	assert.match(focused, /\u001b\[34m\+\u001b\[0m/);
+	assert.match(focused, /Enter\/q\/Esc close/);
+	assert.doesNotMatch(focused, /Inactive:/);
 });
 
 test("ScrollableTextOverlay scrolls repeated held-arrow chunks", () => {
@@ -42,6 +75,21 @@ test("ScrollableTextOverlay scrolls repeated held-arrow chunks", () => {
 	overlay.handleInput("kk");
 	const afterUp = renderedBody(overlay);
 	assert.match(afterUp, /\| line 2\s+\|/);
+});
+
+test("ScrollableTextOverlay closes on CSI-u Escape and Enter", () => {
+	let closed = 0;
+	const overlay = new ScrollableTextOverlay(
+		{ title: "preview", content: "x" },
+		theme,
+		() => {
+			closed += 1;
+		},
+		() => {},
+	);
+	overlay.handleInput("\u001b[27;1u");
+	overlay.handleInput("\u001b[13;1u");
+	assert.equal(closed, 2);
 });
 
 test("ScrollableTextOverlay scrolls Kitty repeat key events", () => {

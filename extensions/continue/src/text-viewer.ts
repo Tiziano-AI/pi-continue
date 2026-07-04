@@ -1,4 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Focusable } from "@earendil-works/pi-tui";
+import { keyRepeat } from "./key-input.ts";
 import { padVisible, stripAnsi, truncateAnsi, visibleWidth } from "./tui-text.ts";
 
 const MIN_WIDTH = 48;
@@ -6,14 +8,6 @@ const TARGET_WIDTH = 92;
 const MAX_HEIGHT = 24;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 const ESCAPE_CHARACTER_PATTERN = /\u001b/g;
-const KITTY_UP_PATTERN = /^\u001b\[1;1(?::[12])?A/;
-const KITTY_DOWN_PATTERN = /^\u001b\[1;1(?::[12])?B/;
-const KITTY_HOME_PATTERN = /^\u001b\[1;1(?::[12])?H/;
-const KITTY_END_PATTERN = /^\u001b\[1;1(?::[12])?F/;
-const KITTY_PAGE_UP_PATTERN = /^\u001b\[5(?:;1)?(?::[12])?~/;
-const KITTY_PAGE_DOWN_PATTERN = /^\u001b\[6(?:;1)?(?::[12])?~/;
-const KITTY_HOME_FUNCTION_PATTERN = /^\u001b\[7(?:;1)?(?::[12])?~/;
-const KITTY_END_FUNCTION_PATTERN = /^\u001b\[8(?:;1)?(?::[12])?~/;
 
 type ViewerColor = "accent" | "border" | "dim" | "muted";
 
@@ -38,21 +32,29 @@ export function sanitizeOverlayText(content: string): string {
 		.replace(ESCAPE_CHARACTER_PATTERN, "");
 }
 
-function topLine(theme: ViewerTheme, width: number, title: string): string {
+function borderColor(focused: boolean): ViewerColor {
+	return focused ? "border" : "muted";
+}
+
+function titleColor(focused: boolean): ViewerColor {
+	return focused ? "accent" : "dim";
+}
+
+function topLine(theme: ViewerTheme, width: number, title: string, focused: boolean): string {
 	const label = ` ${title} `;
 	const fill = Math.max(0, width - visibleWidth(label) - 2);
-	return `${theme.fg("border", "+")}${theme.fg("accent", label)}${theme.fg("border", `${"-".repeat(fill)}+`)}`;
+	return `${theme.fg(borderColor(focused), "+")}${theme.fg(titleColor(focused), label)}${theme.fg(borderColor(focused), `${"-".repeat(fill)}+`)}`;
 }
 
-function bottomLine(theme: ViewerTheme, width: number): string {
+function bottomLine(theme: ViewerTheme, width: number, focused: boolean): string {
 	const inner = Math.max(0, width - 2);
-	return theme.fg("border", `+${"-".repeat(inner)}+`);
+	return theme.fg(borderColor(focused), `+${"-".repeat(inner)}+`);
 }
 
-function frame(theme: ViewerTheme, width: number, content: string): string {
+function frame(theme: ViewerTheme, width: number, content: string, focused: boolean): string {
 	const inner = Math.max(0, width - 2);
 	const safe = padVisible(truncateAnsi(content, inner), inner);
-	return `${theme.fg("border", "|")}${safe}${theme.fg("border", "|")}`;
+	return `${theme.fg(borderColor(focused), "|")}${safe}${theme.fg(borderColor(focused), "|")}`;
 }
 
 function wrapPlainLine(line: string, width: number): string[] {
@@ -83,57 +85,15 @@ function prepareTextLines(content: string, width: number): string[] {
 	return result.length > 0 ? result : ["(empty)"];
 }
 
-function repeatCount(data: string, sequences: string[]): number {
-	for (const sequence of sequences) {
-		if (data === sequence) return 1;
-		if (sequence.length === 0 || data.length <= sequence.length) continue;
-		if (data.length % sequence.length !== 0) continue;
-		const count = data.length / sequence.length;
-		if (sequence.repeat(count) === data) return count;
-	}
-	return 0;
-}
-
-function repeatedPatternCount(data: string, patterns: RegExp[]): number {
-	for (const pattern of patterns) {
-		let index = 0;
-		let count = 0;
-		while (index < data.length) {
-			const match = pattern.exec(data.slice(index));
-			if (!match || match.index !== 0 || match[0].length === 0) {
-				count = 0;
-				break;
-			}
-			index += match[0].length;
-			count += 1;
-		}
-		if (count > 0) return count;
-	}
-	return 0;
-}
-
-function repeatCountFor(data: string, sequences: string[], patterns: RegExp[]): number {
-	return Math.max(repeatCount(data, sequences), repeatedPatternCount(data, patterns));
-}
-
-function keyRepeat(data: string, key: "up" | "down" | "page-up" | "page-down" | "home" | "end" | "close"): number {
-	if (key === "up") return repeatCountFor(data, ["up", "k", "\u001b[A", "\u001bOA"], [KITTY_UP_PATTERN]);
-	if (key === "down") return repeatCountFor(data, ["down", "j", "\u001b[B", "\u001bOB"], [KITTY_DOWN_PATTERN]);
-	if (key === "page-up") return repeatCountFor(data, ["pageup", "page-up", "\u001b[5~", "\u001b[[5~"], [KITTY_PAGE_UP_PATTERN]);
-	if (key === "page-down") return repeatCountFor(data, ["pagedown", "page-down", "\u001b[6~", "\u001b[[6~"], [KITTY_PAGE_DOWN_PATTERN]);
-	if (key === "home") return repeatCountFor(data, ["home", "\u001b[H", "\u001bOH", "\u001b[1~", "\u001b[7~"], [KITTY_HOME_PATTERN, KITTY_HOME_FUNCTION_PATTERN]);
-	if (key === "end") return repeatCountFor(data, ["end", "\u001b[F", "\u001bOF", "\u001b[4~", "\u001b[8~"], [KITTY_END_PATTERN, KITTY_END_FUNCTION_PATTERN]);
-	return repeatCount(data, ["enter", "return", "\r", "\n", "escape", "q", "\u001b", "ctrl+c", "\u0003"]);
-}
-
-export class ScrollableTextOverlay {
+export class ScrollableTextOverlay implements Focusable {
+	focused = false;
 	private scroll = 0;
 	private cachedWidth: number | undefined;
 	private cachedLines: string[] | undefined;
-	private readonly title: string;
-	private readonly content: string;
-	private readonly headerLines: string[];
-	private readonly footer: string;
+	private title: string;
+	private content: string;
+	private headerLines: string[];
+	private footer: string;
 	private readonly theme: ViewerTheme;
 	private readonly done: () => void;
 	private readonly requestRender: () => void;
@@ -151,6 +111,16 @@ export class ScrollableTextOverlay {
 		this.theme = theme;
 		this.done = done;
 		this.requestRender = requestRender;
+	}
+
+	update(options: ScrollableTextOverlayOptions): void {
+		this.title = sanitizeOverlayText(options.title).trim() || "Preview";
+		this.content = sanitizeOverlayText(options.content);
+		this.headerLines = (options.headerLines ?? []).map((line) => sanitizeOverlayText(line));
+		this.footer = options.footer ?? "↑↓/j/k scroll | PgUp/PgDn page | Enter/q/Esc close";
+		this.scroll = 0;
+		this.invalidate();
+		this.requestRender();
 	}
 
 	handleInput(data: string): void {
@@ -183,18 +153,20 @@ export class ScrollableTextOverlay {
 		const maxScroll = Math.max(0, content.length - page);
 		this.scroll = Math.min(this.scroll, maxScroll);
 		const visible = content.slice(this.scroll, this.scroll + page);
+		const focused = this.focused;
 		const scrollLabel = content.length > page
 			? `lines ${this.scroll + 1}-${Math.min(content.length, this.scroll + page)} of ${content.length}`
 			: `${content.length} lines`;
+		const footer = focused ? this.footer : "Inactive: focus this panel to scroll or close";
 		return [
-			topLine(this.theme, overlayWidth, this.title),
-			...this.headerLines.map((line) => frame(this.theme, overlayWidth, ` ${this.theme.fg("dim", line)}`)),
-			frame(this.theme, overlayWidth, ` ${this.theme.fg("dim", scrollLabel)}`),
-			frame(this.theme, overlayWidth, ""),
-			...visible.map((line) => frame(this.theme, overlayWidth, ` ${line}`)),
-			frame(this.theme, overlayWidth, ""),
-			frame(this.theme, overlayWidth, ` ${this.theme.fg("dim", this.footer)}`),
-			bottomLine(this.theme, overlayWidth),
+			topLine(this.theme, overlayWidth, this.title, focused),
+			...this.headerLines.map((line) => frame(this.theme, overlayWidth, ` ${this.theme.fg("dim", line)}`, focused)),
+			frame(this.theme, overlayWidth, ` ${this.theme.fg("dim", scrollLabel)}`, focused),
+			frame(this.theme, overlayWidth, "", focused),
+			...visible.map((line) => frame(this.theme, overlayWidth, ` ${line}`, focused)),
+			frame(this.theme, overlayWidth, "", focused),
+			frame(this.theme, overlayWidth, ` ${this.theme.fg("dim", footer)}`, focused),
+			bottomLine(this.theme, overlayWidth, focused),
 		];
 	}
 

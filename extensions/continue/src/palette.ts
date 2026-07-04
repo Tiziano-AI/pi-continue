@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { loadContinuationConfig } from "./config.ts";
+import { keyMatches, palettePrintableInput, paletteShortcutMatches } from "./key-input.ts";
 import { readEffectivePiCompactionSettings } from "./pi-settings.ts";
 import { resolveProjectContext } from "./project.ts";
 import type { ContinuationRuntimeState } from "./runtime.ts";
@@ -30,29 +31,6 @@ interface FocusDraft {
 	actionId: FocusActionId;
 	text: string;
 	cursor: number;
-}
-
-function keyMatches(data: string, key: "up" | "down" | "left" | "right" | "enter" | "escape" | "ctrl-c" | "backspace" | "delete" | "home" | "end"): boolean {
-	if (key === "up") return data === "up" || data === "\u001b[A";
-	if (key === "down") return data === "down" || data === "\u001b[B";
-	if (key === "left") return data === "left" || data === "\u001b[D";
-	if (key === "right") return data === "right" || data === "\u001b[C";
-	if (key === "enter") return data === "enter" || data === "return" || data === "\r" || data === "\n";
-	if (key === "escape") return data === "escape" || data === "\u001b";
-	if (key === "ctrl-c") return data === "ctrl+c" || data === "\u0003";
-	if (key === "backspace") return data === "backspace" || data === "\u007f" || data === "\b";
-	if (key === "delete") return data === "delete" || data === "\u001b[3~";
-	if (key === "home") return data === "home" || data === "\u001b[H" || data === "\u001b[1~";
-	return data === "end" || data === "\u001b[F" || data === "\u001b[4~";
-}
-
-function isPrintable(data: string): boolean {
-	if (data.length === 0) return false;
-	for (const char of data) {
-		const code = char.codePointAt(0);
-		if (code === undefined || code < 32 || code === 127) return false;
-	}
-	return !data.includes("\u001b");
 }
 
 function topLine(theme: PaletteTheme, width: number, title: string): string {
@@ -204,7 +182,7 @@ export class ContinuePaletteComponent {
 			return;
 		}
 		const selectedAction = this.selectedAction();
-		if (data.toLowerCase() === "f" && isFocusActionId(selectedAction.id)) {
+		if (paletteShortcutMatches(data, "f") && isFocusActionId(selectedAction.id)) {
 			this.focusDraft = { actionId: selectedAction.id, text: "", cursor: 0 };
 			this.requestRender();
 		}
@@ -258,14 +236,14 @@ export class ContinuePaletteComponent {
 				const next = nextCursorIndex(draft.text, draft.cursor);
 				draft.text = `${draft.text.slice(0, draft.cursor)}${draft.text.slice(next)}`;
 			}
-		} else if (data === "\u0015") {
+		} else if (keyMatches(data, "ctrl-u")) {
 			draft.text = draft.text.slice(draft.cursor);
 			draft.cursor = 0;
-		} else if (isPrintable(data)) {
-			draft.text = `${draft.text.slice(0, draft.cursor)}${data}${draft.text.slice(draft.cursor)}`;
-			draft.cursor += data.length;
 		} else {
-			return;
+			const printable = palettePrintableInput(data);
+			if (printable === undefined) return;
+			draft.text = `${draft.text.slice(0, draft.cursor)}${printable}${draft.text.slice(draft.cursor)}`;
+			draft.cursor += printable.length;
 		}
 		this.requestRender();
 	}

@@ -5,7 +5,7 @@ import { loadHistoryPromptAssets } from "./assets.ts";
 import { normalizeCompactionPreparation, snapshotFileOperations, stripCompactionPreparationMessages, type ContinuationCompactionPreparation } from "./compaction-preparation.ts";
 import { CONTINUATION_PROMPT } from "./continuation-prompt.ts";
 import { loadContinuationConfig, loadScopeConfig, patchContinuationConfig, resetContinuationConfig } from "./config.ts";
-import { showLatestContinuationLedger } from "./ledger-viewer.ts";
+import { showLatestContinuationLedger, type ContinuationLedgerOverlayController } from "./ledger-viewer.ts";
 import { showScrollableTextOverlay } from "./text-viewer.ts";
 import { readEffectivePiCompactionSettings } from "./pi-settings.ts";
 import { renderHandoffTrigger, updateHandoffTriggerFromDialog } from "./pi-threshold-settings.ts";
@@ -339,8 +339,8 @@ export async function runStatusCommand(pi: ExtensionAPI, ctx: ExtensionCommandCo
 }
 
 /** Show the latest in-memory Continuation Ledger without mutating the transcript. */
-export async function runLedgerCommand(ctx: ExtensionCommandContext, runtime: ContinuationRuntimeState): Promise<void> {
-	await showLatestContinuationLedger(ctx, getLatestContinuationLedger(runtime));
+export async function runLedgerCommand(ctx: ExtensionCommandContext, runtime: ContinuationRuntimeState, ledgerOverlay: ContinuationLedgerOverlayController): Promise<void> {
+	await showLatestContinuationLedger(ctx, getLatestContinuationLedger(runtime), ledgerOverlay);
 }
 
 /** Reset scoped config. */

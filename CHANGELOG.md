@@ -4,6 +4,16 @@ All notable changes to `pi-continue` are documented here.
 
 ## Unreleased
 
+### Changed
+
+- Reused the current Continuation Ledger TUI panel when a new ledger is shown, so repeated automatic displays and `/continue ledger` update and focus the latest handoff instead of stacking panels.
+- Switched continuation palette and text-overlay keyboard handling to Pi TUI key matching for Kitty/CSI-u input; text overlays also use Pi TUI event buffering for repeated key events.
+
+### Fixed
+
+- Allowed CSI-u Escape/Enter and key-identity shortcuts to close overlays and open `/continue` focus notes reliably, including layouts where the physical `f` shortcut does not decode as printable `f`.
+- Added inactive overlay focus copy and dimmed chrome so users can tell when another panel owns keyboard focus.
+
 ## 0.8.2 - 2026-05-27
 
 ### Changed

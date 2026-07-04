@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { buildContinuationCommandArgs } from "./command-shape.ts";
 import { runLedgerCommand, runPreviewCommand, runResetCommand, runSettingsDialog, runStatusCommand } from "./commands.ts";
 import { loadContinuationConfig } from "./config.ts";
+import type { ContinuationLedgerOverlayController } from "./ledger-viewer.ts";
 import type { ContinuePaletteResult } from "./palette-actions.ts";
 import { sendContinuationPrompt } from "./prompt-dispatch.ts";
 import { resolveProjectContext } from "./project.ts";
@@ -35,6 +36,7 @@ export async function runContinuePaletteResult(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	runtime: ContinuationRuntimeState,
+	ledgerOverlay: ContinuationLedgerOverlayController,
 	result: ContinuePaletteResult,
 	onContinuationFailed: (eventId: string) => void,
 ): Promise<void> {
@@ -43,7 +45,7 @@ export async function runContinuePaletteResult(
 		return;
 	}
 	if (result.kind === "ledger") {
-		await runLedgerCommand(ctx, runtime);
+		await runLedgerCommand(ctx, runtime, ledgerOverlay);
 		return;
 	}
 	if (result.kind === "settings") {
