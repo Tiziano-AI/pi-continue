@@ -4,10 +4,13 @@ All notable changes to `pi-continue` are documented here.
 
 ## Unreleased
 
+## 0.9.0 - 2026-07-04
+
 ### Changed
 
 - Reused the current Continuation Ledger TUI panel when a new ledger is shown, so repeated automatic displays and `/continue ledger` update and focus the latest handoff instead of stacking panels.
 - Switched continuation palette and text-overlay keyboard handling to Pi TUI key matching for Kitty/CSI-u input; text overlays also use Pi TUI event buffering for repeated key events.
+- Updated the package gallery image URL to the v0.9.0 source tag.
 
 ### Fixed
 
