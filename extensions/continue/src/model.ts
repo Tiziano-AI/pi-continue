@@ -23,6 +23,37 @@ export class PromptPassError extends Error {
 	}
 }
 
+interface PromptPassAbort {
+	signal: AbortSignal;
+	timedOut: () => boolean;
+	cleanup: () => void;
+}
+
+function createPromptPassAbortSignal(parent: AbortSignal, timeoutMs: number): PromptPassAbort {
+	const controller = new AbortController();
+	let timedOut = false;
+	const abortFromParent = () => controller.abort(parent.reason);
+	if (parent.aborted) abortFromParent();
+	parent.addEventListener("abort", abortFromParent, { once: true });
+	const timeout = setTimeout(() => {
+		timedOut = true;
+		controller.abort(new Error("pi-continue synthesis timed out"));
+	}, timeoutMs);
+	return {
+		signal: controller.signal,
+		timedOut: () => timedOut,
+		cleanup: () => {
+			clearTimeout(timeout);
+			parent.removeEventListener("abort", abortFromParent);
+		},
+	};
+}
+
+function providerAbortCode(parentSignal: AbortSignal, promptPassAbort: PromptPassAbort): ContinuationSynthesisFailureCode {
+	if (promptPassAbort.timedOut()) return "provider-timeout";
+	return parentSignal.aborted ? "provider-aborted" : "provider-error";
+}
+
 function requestedThinkingLevel(pi: Pick<ExtensionAPI, "getThinkingLevel">, config: ContinuationConfig): ModelThinkingLevel {
 	return config.reasoning === "inherit" ? pi.getThinkingLevel() : config.reasoning;
 }
@@ -61,6 +92,7 @@ export async function runPromptPass(
 	const reasoning = resolveReasoningLevel(pi, model, config);
 	let httpStatus: number | undefined;
 	let response: Awaited<ReturnType<typeof completeSimple>>;
+	const promptPassAbort = createPromptPassAbortSignal(signal, config.synthesisTimeoutMs);
 	try {
 		response = await completeSimple(
 			model,
@@ -80,7 +112,7 @@ export async function runPromptPass(
 						headers: auth.headers,
 						maxTokens: outputBudget.effectiveTokens,
 						reasoning,
-						signal,
+						signal: promptPassAbort.signal,
 						onResponse: (providerResponse) => {
 							httpStatus = providerResponse.status;
 						},
@@ -89,20 +121,23 @@ export async function runPromptPass(
 						apiKey: auth.apiKey,
 						headers: auth.headers,
 						maxTokens: outputBudget.effectiveTokens,
-						signal,
+						signal: promptPassAbort.signal,
 						onResponse: (providerResponse) => {
 							httpStatus = providerResponse.status;
 						},
 					},
 		);
 	} catch {
-		throw new PromptPassError(signal.aborted ? "provider-aborted" : "provider-error", { requestedModel, httpStatus });
+		throw new PromptPassError(providerAbortCode(signal, promptPassAbort), { requestedModel, httpStatus });
+	} finally {
+		promptPassAbort.cleanup();
 	}
 	if (response.stopReason === "error") {
-		throw new PromptPassError("provider-error", { requestedModel, httpStatus });
+		const code = promptPassAbort.signal.aborted ? providerAbortCode(signal, promptPassAbort) : "provider-error";
+		throw new PromptPassError(code, { requestedModel, httpStatus });
 	}
 	if (response.stopReason === "aborted") {
-		throw new PromptPassError("provider-aborted", { requestedModel, httpStatus });
+		throw new PromptPassError(providerAbortCode(signal, promptPassAbort), { requestedModel, httpStatus });
 	}
 	const text = response.content
 		.filter((block): block is { type: "text"; text: string } => block.type === "text")

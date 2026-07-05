@@ -168,6 +168,7 @@ function failureCodeLabel(failure: ContinuationSynthesisFailure): string {
 	if (failure.code === "auth-unavailable") return "auth unavailable";
 	if (failure.code === "provider-error") return "provider error";
 	if (failure.code === "provider-aborted") return "provider aborted";
+	if (failure.code === "provider-timeout") return "provider timeout";
 	if (failure.code === "artifact-empty") return "empty artifact";
 	if (failure.code === "artifact-invalid-json") return "invalid JSON";
 	if (failure.code === "artifact-invalid-shape") return "artifact did not match the current v4 JSON contract";
@@ -266,6 +267,7 @@ export function renderStatus(
 		`- Handoff model: ${config.summarizerModel} -> ${modelDescription}`,
 		`- Reasoning: ${config.reasoning}`,
 		`- History output budget: ${historyBudget}`,
+		`- Synthesis timeout: ${config.synthesisTimeoutMs.toLocaleString()} ms`,
 		`- Continuation artifact mode: ${config.continuationArtifactMode}`,
 		`- Continuation artifact path: ${continuationArtifactPath}`,
 		`- Agent guide: ${agentGuidePath}`,

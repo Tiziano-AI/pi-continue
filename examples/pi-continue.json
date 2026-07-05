@@ -3,6 +3,7 @@
   "summarizerModel": "inherit",
   "reasoning": "inherit",
   "historyMaxTokens": null,
+  "synthesisTimeoutMs": 180000,
   "continuationArtifactMode": "always",
   "agentGuidePath": "AGENTS.md",
   "agentGuideSyncMode": "off",

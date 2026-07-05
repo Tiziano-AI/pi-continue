@@ -25,6 +25,7 @@ const PROMPT_OVERRIDE_POLICIES = new Set<PromptOverridePolicy>([
 	"project-override",
 ]);
 const WRITE_MODES = new Set<WriteMode>(["always", "off"]);
+const DEFAULT_SYNTHESIS_TIMEOUT_MS = 180_000;
 const mutationQueues = new Map<string, Promise<void>>();
 
 async function withConfigMutationQueue(path: string, work: () => Promise<void>): Promise<void> {
@@ -43,6 +44,7 @@ export const DEFAULT_CONTINUE_CONFIG: ContinuationConfig = {
 	summarizerModel: "inherit",
 	reasoning: "inherit",
 	historyMaxTokens: null,
+	synthesisTimeoutMs: DEFAULT_SYNTHESIS_TIMEOUT_MS,
 	continuationArtifactMode: "always",
 	agentGuidePath: "AGENTS.md",
 	agentGuideSyncMode: "off",
@@ -59,6 +61,7 @@ interface PartialContinuationConfig {
 	summarizerModel?: string;
 	reasoning?: string;
 	historyMaxTokens?: number | null;
+	synthesisTimeoutMs?: number;
 	continuationArtifactMode?: string;
 	agentGuidePath?: string;
 	agentGuideSyncMode?: string;
@@ -75,6 +78,7 @@ export interface ContinuationConfigPatch {
 	summarizerModel?: string;
 	reasoning?: ContinuationReasoning;
 	historyMaxTokens?: number | null;
+	synthesisTimeoutMs?: number;
 	continuationArtifactMode?: WriteMode;
 	agentGuidePath?: string;
 	agentGuideSyncMode?: WriteMode;
@@ -118,6 +122,8 @@ function parsePartialConfig(value: unknown): PartialContinuationConfig {
 	if (reasoning !== undefined) result.reasoning = reasoning;
 	const historyMaxTokens = asNullableNumber(value.historyMaxTokens);
 	if (historyMaxTokens !== undefined) result.historyMaxTokens = historyMaxTokens;
+	const synthesisTimeoutMs = asNumber(value.synthesisTimeoutMs);
+	if (synthesisTimeoutMs !== undefined) result.synthesisTimeoutMs = synthesisTimeoutMs;
 	const continuationArtifactMode = asString(value.continuationArtifactMode);
 	if (continuationArtifactMode !== undefined) result.continuationArtifactMode = continuationArtifactMode;
 	const agentGuidePath = asString(value.agentGuidePath);
@@ -192,6 +198,7 @@ function normalizeConfig(partial: PartialContinuationConfig): ContinuationConfig
 		summarizerModel: normalizeSummarizerModel(partial.summarizerModel),
 		reasoning: normalizeReasoning(partial.reasoning),
 		historyMaxTokens: normalizeTokenOverride(partial.historyMaxTokens),
+		synthesisTimeoutMs: normalizeTokenOverride(partial.synthesisTimeoutMs) ?? DEFAULT_CONTINUE_CONFIG.synthesisTimeoutMs,
 		continuationArtifactMode: normalizeWriteMode(partial.continuationArtifactMode, DEFAULT_CONTINUE_CONFIG.continuationArtifactMode),
 		agentGuidePath: normalizePath(partial.agentGuidePath, DEFAULT_CONTINUE_CONFIG.agentGuidePath),
 		agentGuideSyncMode: normalizeWriteMode(partial.agentGuideSyncMode, DEFAULT_CONTINUE_CONFIG.agentGuideSyncMode),

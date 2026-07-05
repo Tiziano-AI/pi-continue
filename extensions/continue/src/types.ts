@@ -17,6 +17,7 @@ export interface ContinuationConfig {
 	summarizerModel: string;
 	reasoning: ContinuationReasoning;
 	historyMaxTokens: number | null;
+	synthesisTimeoutMs: number;
 	continuationArtifactMode: WriteMode;
 	agentGuidePath: string;
 	agentGuideSyncMode: WriteMode;
@@ -91,6 +92,7 @@ export type ContinuationSynthesisFailureCode =
 	| "auth-unavailable"
 	| "provider-error"
 	| "provider-aborted"
+	| "provider-timeout"
 	| "artifact-empty"
 	| "artifact-invalid-json"
 	| "artifact-invalid-shape"

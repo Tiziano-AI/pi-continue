@@ -17,9 +17,9 @@ function stateFor(runtime: object): WorkingUiState {
 function workingIndicator(ctx: ExtensionContext): WorkingIndicatorOptions {
 	return {
 		frames: [
-			ctx.ui.theme.fg("dim", "·"),
+			ctx.ui.theme.fg("dim", "•"),
 			ctx.ui.theme.fg("muted", "•"),
-			ctx.ui.theme.fg("accent", "●"),
+			ctx.ui.theme.fg("accent", "•"),
 			ctx.ui.theme.fg("muted", "•"),
 		],
 		intervalMs: 120,

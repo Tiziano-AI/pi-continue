@@ -4,6 +4,18 @@ All notable changes to `pi-continue` are documented here.
 
 ## Unreleased
 
+## 0.9.1 - 2026-07-06
+
+### Changed
+
+- Updated the package gallery image URL to the v0.9.1 source tag.
+
+### Fixed
+
+- Added a finite `synthesisTimeoutMs` limit to modeled Continuation Ledger generation, so a stalled provider cancels `/continue` before saving or resuming instead of leaving Pi indefinitely at `Compacting context... (escape to cancel)`.
+- Released the custom `pi-continue` working loader as soon as the same-session resume starts, so live tool loops no longer look like the handoff itself is stuck on `pi-continue resume running`.
+- Used one stable bullet glyph for the custom working pulse, preventing dot/circle glyph changes from making the indicator feel optically off-center.
+
 ## 0.9.0 - 2026-07-04
 
 ### Changed

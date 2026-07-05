@@ -270,10 +270,10 @@ test("extension registers only /continue and exact RPC-style /continue falls thr
 	assert.deepEqual(ctx.statusCalls, []);
 	await pi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, ctx);
 	assert.deepEqual(ctx.statusCalls, []);
-	assert.equal(ctx.workingMessages.at(-1), "pi-continue resume running");
+	assert.equal(ctx.workingMessages.at(-1), undefined);
 	await pi.events.get("message_start")({ message: assistantMessage() }, ctx);
 	assert.deepEqual(ctx.statusCalls, []);
-	assert.equal(ctx.workingMessages.at(-1), "pi-continue resume running");
+	assert.equal(ctx.workingMessages.at(-1), undefined);
 	await pi.commands.get("continue").handler(undefined, ctx);
 	assert.equal(ctx.compactCount, 1);
 	await pi.events.get("message_end")({ message: assistantMessage() }, ctx);
@@ -315,7 +315,7 @@ test("queued follow-up message_start starts same-session resume proof", async ()
 	assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
 	await pi.events.get("message_start")({ message: userMessage(CONTINUATION_PROMPT) }, ctx);
 	assert.deepEqual(ctx.statusCalls, []);
-	assert.equal(ctx.workingMessages.at(-1), "pi-continue resume running");
+	assert.equal(ctx.workingMessages.at(-1), undefined);
 	await pi.events.get("message_end")({ message: assistantMessage() }, ctx);
 	assert.deepEqual(ctx.statusCalls, []);
 	assert.equal(ctx.workingMessages.at(-1), undefined);
@@ -368,7 +368,7 @@ test("mid-run guard chains when the resumed assistant tool loop fills context ag
 		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
 		await pi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, ctx);
 		await pi.events.get("message_end")({ message: highUsageAssistantMessage() }, ctx);
-		assert.equal(ctx.workingMessages.at(-1), "pi-continue resume running");
+		assert.equal(ctx.workingMessages.at(-1), undefined);
 		await pi.events.get("context")({
 			messages: [userMessage("continue tools"), highUsageAssistantMessage(), toolResultMessage("x".repeat(160))],
 		}, ctx);
@@ -1049,6 +1049,40 @@ test("session_before_compact fails closed when ledger synthesis cannot authentic
 		assert.deepEqual(result, { cancel: true });
 		assertNoFailedSynthesisSideEffects(cwd, pi);
 	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("session_before_compact fails closed when ledger synthesis times out", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-timeout-hard-fail-"));
+	const faux = registerFauxProvider();
+	try {
+		mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "extensions", "pi-continue.json"), JSON.stringify({
+			agentGuideSyncMode: "always",
+			synthesisTimeoutMs: 1,
+		}), "utf8");
+		faux.setResponses([(_context, options) => new Promise((resolve) => {
+			const resolveAborted = () => resolve(fauxAssistantMessage("", { stopReason: "aborted" }));
+			if (options?.signal?.aborted) {
+				resolveAborted();
+				return;
+			}
+			options?.signal?.addEventListener("abort", resolveAborted, { once: true });
+		})]);
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = faux.models[0];
+		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
+		registerContinueExtension(pi);
+		await pi.commands.get("continue").handler("steer", ctx);
+		const startedAt = Date.now();
+		const result = await pi.events.get("session_before_compact")(compactionEvent(), ctx);
+		assert.deepEqual(result, { cancel: true });
+		assert.ok(Date.now() - startedAt < 1000);
+		assertNoFailedSynthesisSideEffects(cwd, pi);
+	} finally {
+		faux.unregister();
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });

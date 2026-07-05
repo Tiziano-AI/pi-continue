@@ -130,11 +130,25 @@ async function chooseTokenOverride(
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+async function choosePositiveInteger(
+	ctx: ExtensionCommandContext,
+	title: string,
+	current: number,
+): Promise<number | undefined> {
+	const choice = await ctx.ui.select(title, [`Keep current (${current})`, "Enter positive integer"]);
+	if (!choice || choice.startsWith("Keep current")) return undefined;
+	const entered = await ctx.ui.input(title, "positive integer or blank to cancel");
+	if (!entered) return undefined;
+	const parsed = Number.parseInt(entered, 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 const CONFIG_KEYS = [
 	"enabled",
 	"summarizerModel",
 	"reasoning",
 	"historyMaxTokens",
+	"synthesisTimeoutMs",
 	"continuationArtifactMode",
 	"agentGuidePath",
 	"agentGuideSyncMode",
@@ -189,6 +203,7 @@ export async function runSettingsDialog(pi: ExtensionAPI, ctx: ExtensionCommandC
 			`Handoff model: ${config.summarizerModel}`,
 			`Reasoning: ${config.reasoning}`,
 			`History output budget: ${config.historyMaxTokens ?? "Pi default"}`,
+			`Synthesis timeout: ${config.synthesisTimeoutMs} ms`,
 			`Continuation artifact: ${config.continuationArtifactMode}`,
 			`Agent guide path: ${config.agentGuidePath}`,
 			`Agent guide updates: ${config.agentGuideSyncMode} (full replacement only)`,
@@ -234,6 +249,13 @@ export async function runSettingsDialog(pi: ExtensionAPI, ctx: ExtensionCommandC
 			config = await updateSetting(scope, projectContext.projectRoot, config, async (current) => {
 				const next = await chooseTokenOverride(ctx, "History output budget", current.historyMaxTokens);
 				return next !== undefined ? { ...current, historyMaxTokens: next } : undefined;
+			});
+			continue;
+		}
+		if (selected.startsWith("Synthesis timeout:")) {
+			config = await updateSetting(scope, projectContext.projectRoot, config, async (current) => {
+				const next = await choosePositiveInteger(ctx, "Synthesis timeout in milliseconds", current.synthesisTimeoutMs);
+				return next !== undefined ? { ...current, synthesisTimeoutMs: next } : undefined;
 			});
 			continue;
 		}

@@ -33,6 +33,7 @@ test("loadContinuationConfig uses current-session model, reasoning, guard, and o
 		const config = loadContinuationConfig(root);
 		assert.equal(config.summarizerModel, "inherit");
 		assert.equal(config.reasoning, "inherit");
+		assert.equal(config.synthesisTimeoutMs, 180000);
 		assert.equal(config.continuationArtifactMode, "always");
 		assert.equal(config.agentGuidePath, "AGENTS.md");
 		assert.equal(config.agentGuideSyncMode, "off");
@@ -51,6 +52,19 @@ test("loadContinuationConfig ignores non-boolean showAfterCompact", async () => 
 		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ showAfterCompact: "yes" }), "utf8");
 		const config = loadContinuationConfig(root);
 		assert.equal(config.showAfterCompact, true);
+	});
+});
+
+test("loadContinuationConfig normalizes synthesis timeout", async () => {
+	await withTempAgent(async (root) => {
+		const configDir = join(root, ".pi", "extensions");
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ synthesisTimeoutMs: 1.6 }), "utf8");
+		assert.equal(loadContinuationConfig(root).synthesisTimeoutMs, 2);
+		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ synthesisTimeoutMs: 0 }), "utf8");
+		assert.equal(loadContinuationConfig(root).synthesisTimeoutMs, 180000);
+		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ synthesisTimeoutMs: "fast" }), "utf8");
+		assert.equal(loadContinuationConfig(root).synthesisTimeoutMs, 180000);
 	});
 });
 
@@ -128,10 +142,12 @@ test("save and reset round-trip the mid-run guard setting", async () => {
 		await saveContinuationConfig("project", root, {
 			...DEFAULT_CONTINUE_CONFIG,
 			midRunGuardEnabled: false,
+			synthesisTimeoutMs: 2500,
 		});
 		assert.equal(loadContinuationConfig(root).midRunGuardEnabled, false);
 		await resetContinuationConfig("project", root);
 		assert.equal(loadContinuationConfig(root).midRunGuardEnabled, true);
+		assert.equal(loadContinuationConfig(root).synthesisTimeoutMs, 180000);
 		assert.equal(loadContinuationConfig(root).continuationArtifactMode, "always");
 		assert.equal(loadContinuationConfig(root).agentGuideSyncMode, "off");
 	});

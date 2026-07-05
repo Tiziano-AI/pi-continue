@@ -16,7 +16,7 @@ test("working visuals are a compact working indicator, not a shared footer statu
 		ui: {
 			theme: { fg(_color, text) { return text; } },
 			setWorkingMessage(message) { calls.push(["message", message]); },
-			setWorkingIndicator(options) { calls.push(["indicator", options?.intervalMs]); },
+			setWorkingIndicator(options) { calls.push(["indicator", options?.intervalMs, options?.frames]); },
 			setStatus() { calls.push(["footer"]); },
 			setEditorComponent() { calls.push(["editor"]); },
 		},
@@ -28,10 +28,10 @@ test("working visuals are a compact working indicator, not a shared footer statu
 	settleWorkingVisuals(ctx, runtime, "continue-1");
 	assert.deepEqual(calls, [
 		["message", "pi-continue compacting"],
-		["indicator", 120],
+		["indicator", 120, ["•", "•", "•", "•"]],
 		["message", "pi-continue resuming"],
 		["message", undefined],
-		["indicator", undefined],
+		["indicator", undefined, undefined],
 	]);
 });
 
@@ -43,7 +43,7 @@ test("clearWorkingVisuals restores only the owning working indicator", () => {
 		ui: {
 			theme: { fg(_color, text) { return text; } },
 			setWorkingMessage(message) { calls.push(["message", message]); },
-			setWorkingIndicator(options) { calls.push(["indicator", options?.intervalMs]); },
+			setWorkingIndicator(options) { calls.push(["indicator", options?.intervalMs, options?.frames]); },
 			setStatus() { calls.push(["footer"]); },
 		},
 	};
@@ -52,8 +52,8 @@ test("clearWorkingVisuals restores only the owning working indicator", () => {
 	clearWorkingVisuals(ctx, runtime);
 	assert.deepEqual(calls, [
 		["message", "pi-continue compacting"],
-		["indicator", 120],
+		["indicator", 120, ["•", "•", "•", "•"]],
 		["message", undefined],
-		["indicator", undefined],
+		["indicator", undefined, undefined],
 	]);
 });

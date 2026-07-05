@@ -219,7 +219,36 @@ test("renderStatus uses bounded model-provider failure diagnostics", () => {
 			latestEvent,
 		);
 		assert.match(rendered, /Synthesis failure: model\/provider call failed during history pass \(auth unavailable\); requested openai\/gpt-test\./);
+		assert.match(rendered, /Synthesis timeout: 180,000 ms/);
 		assert.doesNotMatch(rendered, new RegExp(secretLike));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("renderStatus reports provider timeout diagnostics", () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-continuation-status-"));
+	try {
+		const latestEvent = baseEvent({
+			id: "continue-4",
+			status: "failed",
+			artifactStatus: "aborted",
+			compactionProof: { status: "failed", failureReason: "Continuation handoff failed." },
+			promptStatus: "failed",
+			resume: { status: "not-requested" },
+			synthesisFailure: { kind: "model-provider-call", code: "provider-timeout", pass: "history", requestedModel: "openai/gpt-test" },
+			failureReason: "Continuation handoff failed.",
+		});
+		const rendered = renderStatus(
+			baseCtx(),
+			DEFAULT_CONTINUE_CONFIG,
+			root,
+			artifactPath(root),
+			join(root, "AGENTS.md"),
+			undefined,
+			latestEvent,
+		);
+		assert.match(rendered, /Synthesis failure: model\/provider call failed during history pass \(provider timeout\); requested openai\/gpt-test\./);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

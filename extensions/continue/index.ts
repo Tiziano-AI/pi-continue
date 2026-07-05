@@ -156,21 +156,21 @@ export default function (pi: ExtensionAPI) {
 		if (event.prompt !== CONTINUATION_PROMPT) return;
 		const eventId = markAwaitingContinuationResumeStarted(runtime);
 		if (!eventId) return;
-		updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
+		clearWorkingVisuals(ctx, runtime);
 	});
 
 	pi.on("message_start", async (event, ctx) => {
 		if (isContinuationPromptUserMessage(event.message, CONTINUATION_PROMPT)) {
 			const eventId = markAwaitingContinuationResumeStarted(runtime);
 			if (eventId) {
-				updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
+				clearWorkingVisuals(ctx, runtime);
 			}
 			return;
 		}
 		if (!isAssistantMessage(event.message)) return;
 		const eventId = runtime.awaitingResumeEventId;
 		if (!eventId || runtime.latestEvent?.id !== eventId || runtime.latestEvent.resume.status !== "running") return;
-		updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
+		clearWorkingVisuals(ctx, runtime);
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {

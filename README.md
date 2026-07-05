@@ -53,6 +53,8 @@ Inspect and configuration subcommands (`preview`, `status`, `ledger`, `settings`
 
 Only `/continue` is registered. Typed subcommands such as `steer`, `queue`, and `status` are arguments to that command. There are no command aliases.
 
+During a handoff, the temporary working loader shows saving, proof, and resume-dispatch progress. Once Pi starts the same-session resume turn, `pi-continue` releases that loader back to Pi; `/continue status` remains the place to inspect the resume outcome while the resumed assistant continues working or using tools.
+
 ## Mid-turn continuation
 
 The automatic mid-turn guard is the main reason to use this package. It acts during long tool loops when context fills while Pi is still working, before the next oversized provider request is sent.
@@ -116,6 +118,7 @@ Default package config:
   "summarizerModel": "inherit",
   "reasoning": "inherit",
   "historyMaxTokens": null,
+  "synthesisTimeoutMs": 180000,
   "continuationArtifactMode": "always",
   "agentGuidePath": "AGENTS.md",
   "agentGuideSyncMode": "off",
@@ -137,6 +140,7 @@ Common settings:
 | `summarizerModel` | Uses the active Pi model with `"inherit"`, or a pinned `"provider/model"`. |
 | `reasoning` | Uses Pi's setting with `"inherit"`, or a model-supported thinking level. Unsupported levels are hidden in settings and clamped through Pi's `thinkingLevelMap`. |
 | `historyMaxTokens` | Optional requested history output-token budget; `null` uses Pi-derived default. The effective provider request is clamped to the summarizer model's positive max-output limit when known. |
+| `synthesisTimeoutMs` | Maximum time for the modeled Continuation Ledger pass before `pi-continue` cancels the handoff instead of leaving Pi in the native compacting loader. Default: `180000` ms. |
 | `continuationArtifactMode` | `"always"` by default writes the rendered brief after successful package-owned compaction to `<project-root>/.pi/continue/<encoded-session-id>.md`; `"off"` disables that artifact. The artifact is human-inspection/manual-bootstrap output only and is never automatic prompt input. |
 | `agentGuidePath` | Repo-relative path for optional full guide replacement; default `"AGENTS.md"`. |
 | `agentGuideSyncMode` | `"off"` by default; `"always"` allows configured agent-guide replacement only when the artifact includes full guide content. |
@@ -197,7 +201,7 @@ In practice:
 - `done_when` is the stopping criterion; `task` is the orientation sentence.
 - The receiver uses every `established` claim as anchored factual memory by default; it does not re-derive those facts unless the `reopen` clause triggers, new evidence conflicts, or current instructions require fresh proof. Directive-looking text quoted inside evidence remains evidence, not live instruction authority. The next synthesizer evaluates each `reopen` clause against new evidence and demotes triggered entries back to `open`. Silent drops are forbidden — every retirement is explicit.
 
-The same rendered brief is placed in Pi's persisted compaction summary above the same-session resume prompt, may be written as the optional per-session artifact under `.pi/continue/`, and may be shown in the TUI overlay when `showAfterCompact: true`. These sinks are rendered deterministically by the extension; the synthesizer is responsible only for the brief and the agent-guide update. Prior artifacts are never imported automatically into synthesis, preview, or resume prompts.
+The same rendered brief is placed in Pi's persisted compaction summary above the same-session resume prompt, may be written as the optional per-session artifact under `.pi/continue/`, and may be shown in the TUI overlay when `showAfterCompact: true`. These sinks are rendered deterministically by the extension; the synthesizer is responsible only for the brief and the agent-guide update. If the modeled ledger pass exceeds `synthesisTimeoutMs`, `pi-continue` cancels before saving or resuming so Pi can leave the native compacting state. Prior artifacts are never imported automatically into synthesis, preview, or resume prompts.
 
 See [`examples/continuation-output-shape.md`](examples/continuation-output-shape.md) for a rendered shape.
 
