@@ -4,6 +4,16 @@ All notable changes to `pi-continue` are documented here.
 
 ## Unreleased
 
+## 0.9.3 - 2026-07-08
+
+### Changed
+
+- Updated the package gallery image URL to the v0.9.3 source tag.
+
+### Fixed
+
+- Kept the `pi-continue resume running` working message visible while same-session resume is active after direct, queued follow-up, and resumed tool-use starts.
+
 ## 0.9.2 - 2026-07-08
 
 ### Changed
