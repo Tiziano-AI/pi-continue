@@ -4,6 +4,16 @@ All notable changes to `pi-continue` are documented here.
 
 ## Unreleased
 
+## 0.9.2 - 2026-07-08
+
+### Changed
+
+- Updated the package gallery image URL to the v0.9.2 source tag.
+
+### Fixed
+
+- Automatic mid-run continuation now skips when Pi has no compactable session history, preventing failed handoffs when total context crosses the trigger because of prompt overhead or recently kept history.
+
 ## 0.9.1 - 2026-07-06
 
 ### Changed

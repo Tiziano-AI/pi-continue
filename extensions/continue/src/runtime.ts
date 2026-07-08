@@ -37,6 +37,7 @@ export type ContinuationRequestSource = ContinuationEventSource;
 
 export interface ContinuationRuntimeState extends ResumeProofRuntimeState {
 	latestLedger: ContinuationLedgerSnapshot | undefined;
+	lastNoCompactableGuardKey: string | undefined;
 }
 
 export interface ContinuationRequest {
@@ -107,6 +108,7 @@ export function createContinuationRuntimeState(): ContinuationRuntimeState {
 		compactionProofTimeout: undefined,
 		pendingResumeDispatch: undefined,
 		latestLedger: undefined,
+		lastNoCompactableGuardKey: undefined,
 		latestEvent: undefined,
 		activeEventId: undefined,
 		nextEventSequence: 0,

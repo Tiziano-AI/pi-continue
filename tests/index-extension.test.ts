@@ -113,6 +113,7 @@ function continuationArtifactJson(agentGuideContent: string | null = null) {
 function createCommandContext(cwd, custom) {
 	let compactCount = 0;
 	let compactOptions;
+	let branchEntries = [];
 	const statusCalls = [];
 	const workingMessages = [];
 	const ctx = {
@@ -120,7 +121,11 @@ function createCommandContext(cwd, custom) {
 		hasUI: true,
 		model: { provider: "openai", id: "gpt-test", contextWindow: 128000 },
 		modelRegistry: { getAvailable() { return []; } },
-		sessionManager: { getBranch() { return []; }, getSessionId() { return "session-test"; } },
+		sessionManager: {
+			getBranch() { return branchEntries; },
+			getLeafId() { return branchEntries.at(-1)?.id ?? null; },
+			getSessionId() { return "session-test"; },
+		},
 		ui: {
 			theme: { fg(_color, text) { return text; }, bold(text) { return text; } },
 			async custom(factory, options) {
@@ -160,6 +165,9 @@ function createCommandContext(cwd, custom) {
 		},
 		get compactOptions() {
 			return compactOptions;
+		},
+		setBranch(entries) {
+			branchEntries = entries;
 		},
 		statusCalls,
 		workingMessages,
@@ -211,6 +219,14 @@ function branchToolResultEntry(id, parentId, toolCallId, text, toolName = "read"
 		isError: false,
 		timestamp: 0,
 	});
+}
+
+function compactableToolBranch() {
+	return [
+		branchMessageEntry("branch-user", null, userMessage(`run tool ${"x".repeat(80)}`)),
+		branchAssistantToolEntry("branch-assistant", "branch-user", "tool-1", "/repo/file.ts"),
+		branchToolResultEntry("branch-result", "branch-assistant", "tool-1", "x"),
+	];
 }
 
 function compactionEvent(preparation = {}, branchEntries = []) {
@@ -331,15 +347,70 @@ test("mid-run guard dispatches resume as follow-up after context threshold proof
 		const pi = createFakePi(cwd);
 		const ctx = createCommandContext(cwd, async () => undefined);
 		ctx.model = { ...ctx.model, contextWindow: 100 };
+		ctx.setBranch(compactableToolBranch());
+		let abortCount = 0;
+		ctx.abort = () => {
+			abortCount += 1;
+		};
 		registerContinueExtension(pi);
 		await pi.events.get("context")({
 			messages: [userMessage("run tool"), highUsageAssistantMessage(), toolResultMessage("x".repeat(160))],
 		}, ctx);
 		assert.equal(ctx.compactCount, 1);
+		assert.equal(abortCount, 1);
 		ctx.compactOptions.onComplete({});
 		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
 		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 		assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("mid-run guard skips cleanly when Pi has no compactable session preparation", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-mid-run-no-compactable-"));
+	try {
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 20000 },
+		}), "utf8");
+		const pi = createFakePi(cwd);
+		const notifications = [];
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...ctx.model, contextWindow: 100 };
+		ctx.setBranch(compactableToolBranch());
+		ctx.ui.notify = (message, type) => {
+			notifications.push([message, type]);
+		};
+		let abortCount = 0;
+		ctx.abort = () => {
+			abortCount += 1;
+		};
+		registerContinueExtension(pi);
+		const event = {
+			messages: [userMessage("run tool"), highUsageAssistantMessage(), toolResultMessage("x")],
+		};
+		await pi.events.get("context")(event, ctx);
+		await pi.events.get("context")(event, ctx);
+		assert.equal(ctx.compactCount, 0);
+		assert.equal(abortCount, 0);
+		assert.deepEqual(pi.sent, []);
+		assert.deepEqual(notifications, [[
+			"automatic continuation skipped: Pi has no compactable session history yet; the over-threshold context is still within the recent keep window or static prompt overhead.",
+			"warning",
+		]]);
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
+		}), "utf8");
+		await pi.events.get("context")(event, ctx);
+		assert.equal(ctx.compactCount, 1);
+		assert.equal(abortCount, 1);
+		assert.equal(notifications.length, 2);
+		assert.match(notifications[1][0], /^automatic continuation: saving handoff/);
+		assert.equal(notifications[1][1], "info");
+		ctx.compactOptions.onComplete({});
+		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -359,6 +430,11 @@ test("mid-run guard chains when the resumed assistant tool loop fills context ag
 		const notifications = [];
 		const ctx = createCommandContext(cwd, async () => undefined);
 		ctx.model = { ...ctx.model, contextWindow: 100 };
+		ctx.setBranch(compactableToolBranch());
+		let abortCount = 0;
+		ctx.abort = () => {
+			abortCount += 1;
+		};
 		ctx.ui.notify = (message, type) => {
 			notifications.push([message, type]);
 		};
@@ -373,6 +449,7 @@ test("mid-run guard chains when the resumed assistant tool loop fills context ag
 			messages: [userMessage("continue tools"), highUsageAssistantMessage(), toolResultMessage("x".repeat(160))],
 		}, ctx);
 		assert.equal(ctx.compactCount, 2);
+		assert.equal(abortCount, 1);
 		assert.equal(ctx.workingMessages.at(-1), "pi-continue saving handoff");
 		assert.deepEqual(notifications, [
 			["/continue steer: saving handoff.", "info"],

@@ -412,6 +412,7 @@ export default function (pi: ExtensionAPI) {
 		ledgerOverlay.clear();
 		runtime.compactionRunning = false;
 		runtime.guardFailureKey = undefined;
+		runtime.lastNoCompactableGuardKey = undefined;
 		clearResumeStartTimeout(runtime);
 		clearPendingResumeDispatch(runtime);
 		runtime.awaitingResumeEventId = undefined;

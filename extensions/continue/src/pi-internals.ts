@@ -3,6 +3,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 interface PiInternals {
 	prepareCompaction: (entries: unknown[], settings: { enabled: boolean; reserveTokens: number; keepRecentTokens: number }) => unknown;
+	estimateTokens: (message: unknown) => number;
 	estimateContextTokens: (messages: unknown[]) => {
 		tokens: number;
 		usageTokens: number;
@@ -28,6 +29,7 @@ export async function loadPiInternals(): Promise<PiInternals> {
 			]);
 			return {
 				prepareCompaction: compactionModule.prepareCompaction,
+				estimateTokens: compactionModule.estimateTokens,
 				estimateContextTokens: compactionModule.estimateContextTokens,
 				convertToLlm: messagesModule.convertToLlm,
 				serializeConversation: utilsModule.serializeConversation,
