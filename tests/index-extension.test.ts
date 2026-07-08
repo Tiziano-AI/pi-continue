@@ -286,10 +286,10 @@ test("extension registers only /continue and exact RPC-style /continue falls thr
 	assert.deepEqual(ctx.statusCalls, []);
 	await pi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, ctx);
 	assert.deepEqual(ctx.statusCalls, []);
-	assert.equal(ctx.workingMessages.at(-1), undefined);
+	assert.equal(ctx.workingMessages.at(-1), "pi-continue resume running");
 	await pi.events.get("message_start")({ message: assistantMessage() }, ctx);
 	assert.deepEqual(ctx.statusCalls, []);
-	assert.equal(ctx.workingMessages.at(-1), undefined);
+	assert.equal(ctx.workingMessages.at(-1), "pi-continue resume running");
 	await pi.commands.get("continue").handler(undefined, ctx);
 	assert.equal(ctx.compactCount, 1);
 	await pi.events.get("message_end")({ message: assistantMessage() }, ctx);
@@ -331,7 +331,7 @@ test("queued follow-up message_start starts same-session resume proof", async ()
 	assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
 	await pi.events.get("message_start")({ message: userMessage(CONTINUATION_PROMPT) }, ctx);
 	assert.deepEqual(ctx.statusCalls, []);
-	assert.equal(ctx.workingMessages.at(-1), undefined);
+	assert.equal(ctx.workingMessages.at(-1), "pi-continue resume running");
 	await pi.events.get("message_end")({ message: assistantMessage() }, ctx);
 	assert.deepEqual(ctx.statusCalls, []);
 	assert.equal(ctx.workingMessages.at(-1), undefined);
@@ -444,7 +444,7 @@ test("mid-run guard chains when the resumed assistant tool loop fills context ag
 		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
 		await pi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, ctx);
 		await pi.events.get("message_end")({ message: highUsageAssistantMessage() }, ctx);
-		assert.equal(ctx.workingMessages.at(-1), undefined);
+		assert.equal(ctx.workingMessages.at(-1), "pi-continue resume running");
 		await pi.events.get("context")({
 			messages: [userMessage("continue tools"), highUsageAssistantMessage(), toolResultMessage("x".repeat(160))],
 		}, ctx);
