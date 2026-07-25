@@ -1,40 +1,32 @@
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-
-interface PiInternals {
-	prepareCompaction: (entries: unknown[], settings: { enabled: boolean; reserveTokens: number; keepRecentTokens: number }) => unknown;
+export interface PiInternals {
+	prepareCompaction: (entries: unknown[], settings: Settings) => unknown;
 	estimateTokens: (message: unknown) => number;
-	estimateContextTokens: (messages: unknown[]) => {
-		tokens: number;
-		usageTokens: number;
-		trailingTokens: number;
-		lastUsageIndex: number | null;
-	};
+	estimateContextTokens: (messages: unknown[]) => Context;
 	convertToLlm: (messages: unknown[]) => unknown[];
 	serializeConversation: (messages: unknown[]) => string;
 }
 
-let cachedInternals: Promise<PiInternals> | undefined;
+export interface Settings {
+	enabled: boolean;
+	reserveTokens: number;
+	keepRecentTokens: number;
+}
 
-/** Resolve Pi internal compaction helpers from the installed package at runtime. */
-export async function loadPiInternals(): Promise<PiInternals> {
-	if (!cachedInternals) {
-		cachedInternals = (async () => {
-			const packageEntryUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
-			const distRoot = dirname(fileURLToPath(packageEntryUrl));
-			const [compactionModule, messagesModule, utilsModule] = await Promise.all([
-				import(pathToFileURL(join(distRoot, "core", "compaction", "compaction.js")).href),
-				import(pathToFileURL(join(distRoot, "core", "messages.js")).href),
-				import(pathToFileURL(join(distRoot, "core", "compaction", "utils.js")).href),
-			]);
-			return {
-				prepareCompaction: compactionModule.prepareCompaction,
-				estimateTokens: compactionModule.estimateTokens,
-				estimateContextTokens: compactionModule.estimateContextTokens,
-				convertToLlm: messagesModule.convertToLlm,
-				serializeConversation: utilsModule.serializeConversation,
-			};
-		})();
-	}
-	return cachedInternals;
+export interface Context {
+	tokens: number;
+	usageTokens: number;
+	trailingTokens: number;
+	lastUsageIndex: number | null;
+}
+
+const core = "@earendil-works/pi-coding-agent";
+const local = "./pi-internals-local.ts";
+let internals: Promise<PiInternals> | undefined;
+
+export function loadPiInternals(): Promise<PiInternals> {
+	internals ??= Promise.all([
+		import(core) as Promise<typeof import("@earendil-works/pi-coding-agent")>,
+		import(local) as Promise<typeof import("./pi-internals-local.ts")>,
+	]).then(([api, module]) => module.createPiInternals(api));
+	return internals;
 }
