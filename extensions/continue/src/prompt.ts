@@ -48,6 +48,20 @@ export function compileHistoryPrompt(assets: HistoryPromptAssets, input: History
 	};
 }
 
+/** Retry reminder for models that answer the artifact contract with prose or partial JSON. */
+export const ARTIFACT_REPAIR_REMINDER = [
+	"<artifact-format-retry>",
+	"The previous response could not be read as the required artifact.",
+	"Return only the JSON object defined by the contract above: no prose, no Markdown fences, no reasoning tags, no XML wrapper.",
+	"The response must start with { and end with }.",
+	"</artifact-format-retry>",
+].join("\n");
+
+/** Append the retry reminder to an already compiled history prompt. */
+export function withArtifactRepairReminder(prompt: CompiledPrompt): CompiledPrompt {
+	return { ...prompt, userPrompt: `${prompt.userPrompt}\n\n${ARTIFACT_REPAIR_REMINDER}` };
+}
+
 /** Render a human-readable prompt preview for the settings and preview commands. */
 export function renderPromptPreview(title: string, prompt: CompiledPrompt): string {
 	const parts = [

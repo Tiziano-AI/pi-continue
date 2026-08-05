@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { DEFAULT_CONTINUE_CONFIG } from "../extensions/continue/src/config.ts";
 import {
+	ADOPTION_CHECKPOINT_MAX_AGE_MS,
+	decideAdoptedCompactionTrigger,
 	decideMidRunGuardTrigger,
 	hasNativeCompactionPreparation,
 	shouldEvaluateMidRunContext,
@@ -125,6 +128,73 @@ test("decideMidRunGuardTrigger only trips above the reserve threshold", () => {
 		trailingTokens: 11,
 		lastUsageIndex: 3,
 	});
+});
+
+test("decideAdoptedCompactionTrigger owns only over-threshold Pi compactions", () => {
+	const now = 10_000;
+	const base = {
+		config: DEFAULT_CONTINUE_CONFIG,
+		piCompactionEnabled: true,
+		contextWindow: 100,
+		reserveTokens: 20,
+		tokensBefore: 130,
+		checkpoint: { stopReason: "stop", openedAt: now - 10 },
+		reason: "threshold",
+		now,
+	};
+
+	assert.deepEqual(decideAdoptedCompactionTrigger(base), {
+		estimatedTokens: 130,
+		thresholdTokens: 80,
+		contextWindow: 100,
+		reserveTokens: 20,
+		usageTokens: 130,
+		trailingTokens: 0,
+		lastUsageIndex: null,
+	});
+	assert.equal(decideAdoptedCompactionTrigger({ ...base, tokensBefore: 80 }), undefined);
+	assert.equal(decideAdoptedCompactionTrigger({ ...base, contextWindow: undefined }), undefined);
+	assert.equal(decideAdoptedCompactionTrigger({ ...base, reserveTokens: 100 }), undefined);
+	assert.equal(decideAdoptedCompactionTrigger({ ...base, piCompactionEnabled: false }), undefined);
+	assert.equal(decideAdoptedCompactionTrigger({
+		...base,
+		config: { ...DEFAULT_CONTINUE_CONFIG, adoptNativeCompaction: false },
+	}), undefined);
+	assert.equal(decideAdoptedCompactionTrigger({
+		...base,
+		config: { ...DEFAULT_CONTINUE_CONFIG, enabled: false },
+	}), undefined);
+});
+
+test("decideAdoptedCompactionTrigger requires the checkpoint of a finished assistant turn", () => {
+	const now = 10_000;
+	const adoptable = {
+		config: DEFAULT_CONTINUE_CONFIG,
+		piCompactionEnabled: true,
+		contextWindow: 100,
+		reserveTokens: 20,
+		tokensBefore: 130,
+		checkpoint: { stopReason: "stop", openedAt: now - 10 },
+		reason: "threshold",
+		now,
+	};
+	const checkpoint = (overrides: Record<string, unknown> | undefined) => decideAdoptedCompactionTrigger({
+		...adoptable,
+		checkpoint: overrides === undefined ? undefined : { ...adoptable.checkpoint, ...overrides },
+	});
+
+	assert.ok(decideAdoptedCompactionTrigger(adoptable), "a claimed fresh checkpoint is adoptable");
+	// Manual /compact, a compaction while input is submitted, and a second compaction for the
+	// same turn all arrive without an open checkpoint.
+	assert.equal(checkpoint(undefined), undefined);
+	assert.equal(checkpoint({ openedAt: now - ADOPTION_CHECKPOINT_MAX_AGE_MS - 1 }), undefined);
+	// Context-overflow recovery and cancelled turns are Pi's to resume, not the package's.
+	assert.equal(checkpoint({ stopReason: "error" }), undefined);
+	assert.equal(checkpoint({ stopReason: "aborted" }), undefined);
+	assert.equal(checkpoint({ stopReason: undefined }), undefined);
+	// Pi reports a /compact request and context-overflow recovery as their own triggers.
+	assert.equal(decideAdoptedCompactionTrigger({ ...adoptable, reason: "manual" }), undefined);
+	assert.equal(decideAdoptedCompactionTrigger({ ...adoptable, reason: "overflow" }), undefined);
 });
 
 test("hasNativeCompactionPreparation rejects Pi's false no-preparation sentinel", () => {

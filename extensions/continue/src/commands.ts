@@ -101,7 +101,7 @@ async function chooseModel(ctx: ExtensionCommandContext): Promise<string | undef
 	return selected;
 }
 
-const ALL_REASONING_OPTIONS: readonly ContinuationConfig["reasoning"][] = ["inherit", "off", "minimal", "low", "medium", "high", "xhigh"];
+const ALL_REASONING_OPTIONS: readonly ContinuationConfig["reasoning"][] = ["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /** Return operator-selectable reasoning levels, hiding levels unsupported by the resolved summarizer model. */
 export function getReasoningOptionsForModel(model: Model<Api> | undefined): ContinuationConfig["reasoning"][] {

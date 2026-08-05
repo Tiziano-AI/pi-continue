@@ -12,8 +12,10 @@ import {
 import type {
 	ContinuationEventSource,
 	ContinuationLatestEvent,
+	ContinuationAdoptionCheckpoint,
 	ContinuationLedgerSnapshot,
 	ContinuationResumeStatus,
+	ContinuationTurnProvenance,
 	MidRunGuardTrigger,
 } from "./types.ts";
 import {
@@ -30,12 +32,12 @@ import {
 } from "./working-ui.ts";
 
 export { CONTINUATION_PROMPT } from "./continuation-prompt.ts";
-export { acceptContinuationCompactionProof, armDeferredResumeStartTimeout, clearResumeStartTimeout, dispatchVerifiedContinuationResume, failContinuationCompactionProof, verifyContinuationCompactionProof } from "./resume-proof.ts";
+export { acceptContinuationCompactionProof, armDeferredResumeStartTimeout, clearResumeStartTimeout, dispatchVerifiedContinuationResume, failContinuationCompactionProof, markContinuationCompactionComplete, verifyContinuationCompactionProof } from "./resume-proof.ts";
 
 export type ContinuationRequestMode = "steer" | "queue";
 export type ContinuationRequestSource = ContinuationEventSource;
 
-export interface ContinuationRuntimeState extends ResumeProofRuntimeState {
+export interface ContinuationRuntimeState extends ResumeProofRuntimeState, ContinuationTurnProvenance {
 	latestLedger: ContinuationLedgerSnapshot | undefined;
 	lastNoCompactableGuardKey: string | undefined;
 }
@@ -109,6 +111,8 @@ export function createContinuationRuntimeState(): ContinuationRuntimeState {
 		pendingResumeDispatch: undefined,
 		latestLedger: undefined,
 		lastNoCompactableGuardKey: undefined,
+		adoptionCheckpoint: undefined,
+		lastAssistantStopReason: undefined,
 		latestEvent: undefined,
 		activeEventId: undefined,
 		nextEventSequence: 0,
@@ -149,9 +153,10 @@ export function buildGuardInstructions(trigger: MidRunGuardTrigger): string {
 	].join("\n");
 }
 
-function sourceLabel(source: ContinuationRequestSource): string {
+function sourceLabel(source: ContinuationEventSource): string {
 	if (source === "command-queue") return "queued /continue";
 	if (source === "command-steer") return "/continue steer";
+	if (source === "adopted-compaction") return "adopted automatic compaction";
 	return "automatic continuation";
 }
 
@@ -195,6 +200,12 @@ function compactionFailureReason(runtime: ContinuationRuntimeState, eventId: str
 	return COMPACTION_FAILURE;
 }
 
+/** Whether Pi already saved and reported this event's package-owned handoff entry. */
+function hasVerifiedCompactionProof(runtime: ContinuationRuntimeState, eventId: string): boolean {
+	const event = runtime.latestEvent;
+	return event?.id === eventId && event.compactionProof.status === "verified";
+}
+
 /** Start the package-owned compaction pipeline once, with visible lifecycle settlement. */
 export function startContinuationCompaction(
 	ctx: ExtensionContext,
@@ -235,7 +246,11 @@ export function startContinuationCompaction(
 		options.continueAfterComplete ? "pending" : "not-requested",
 	);
 	beginWorkingVisuals(ctx, runtime, event.id, "pi-continue saving handoff");
-	if (options.abortActiveRun) ctx.abort();
+	// Pi's ctx.compact() aborts the active operation before it prepares the compaction.
+	// Calling ctx.abort() first lets Pi's automatic compaction race the package-owned
+	// request and can leave the latter with an "Already compacted" error, so this pipeline
+	// has one abort owner: ctx.compact(). The compaction Pi may still start from that
+	// aborted turn is cancelled in the session_before_compact handler.
 	const label = sourceLabel(options.source);
 	const triggerText = options.trigger ? ` (${describeGuardTrigger(options.trigger)})` : "";
 	notify(ctx, `${label}: saving handoff${triggerText}.`, "info");
@@ -271,23 +286,35 @@ export function startContinuationCompaction(
 		settleWorkingVisuals(ctx, runtime, event.id);
 		notify(ctx, `${label}: handoff failed: ${reason}`, "error");
 	}
+	function completeCompaction(): void {
+		runtime.compactionRunning = false;
+		runtime.guardFailureKey = undefined;
+		if (options.continueAfterComplete) {
+			markContinuationCompactionComplete(ctx, runtime, event.id);
+			return;
+		}
+		finishContinuationEvent(runtime, event.id, "completed", undefined);
+		settleWorkingVisuals(ctx, runtime, event.id);
+		notify(ctx, `${label}: handoff saved.`, "info");
+	}
 	try {
 		ctx.compact({
 			customInstructions,
 			onComplete: () => {
 				if (!claimCompactionCallback()) return;
-				runtime.compactionRunning = false;
-				runtime.guardFailureKey = undefined;
-				if (options.continueAfterComplete) {
-					markContinuationCompactionComplete(ctx, runtime, event.id);
-					return;
-				}
-				finishContinuationEvent(runtime, event.id, "completed", undefined);
-				settleWorkingVisuals(ctx, runtime, event.id);
-				notify(ctx, `${label}: handoff saved.`, "info");
+				completeCompaction();
 			},
 			onError: () => {
 				if (!claimCompactionCallback()) return;
+				// A concurrent compaction can save this event's package-owned handoff before Pi
+				// runs the package's own request, which then fails with "Already compacted".
+				// Pi's saved and reported entry is the handoff, so the resume follows that proof
+				// instead of failing a handoff Pi already stored.
+				if (hasVerifiedCompactionProof(runtime, event.id)) {
+					notify(ctx, `${label}: another compaction already saved this handoff.`, "warning");
+					completeCompaction();
+					return;
+				}
 				failCompaction(compactionFailureReason(runtime, event.id));
 			},
 		});
@@ -296,6 +323,98 @@ export function startContinuationCompaction(
 		return false;
 	}
 	return true;
+}
+
+/** Record the stop reason of the assistant response that just finished. */
+export function recordAssistantStopReason(runtime: ContinuationRuntimeState, stopReason: string | undefined): void {
+	runtime.lastAssistantStopReason = stopReason;
+}
+
+/** Open the single adoptable checkpoint for the assistant turn that just ended. */
+export function openContinuationAdoptionCheckpoint(runtime: ContinuationRuntimeState): void {
+	runtime.adoptionCheckpoint = { stopReason: runtime.lastAssistantStopReason, openedAt: Date.now() };
+}
+
+/** Close the checkpoint because new user input or a new turn owns what happens next. */
+export function clearContinuationAdoptionCheckpoint(runtime: ContinuationRuntimeState): void {
+	runtime.adoptionCheckpoint = undefined;
+}
+
+/** Claim the checkpoint for at most one compaction, so a later compaction cannot reuse it. */
+export function consumeContinuationAdoptionCheckpoint(runtime: ContinuationRuntimeState): ContinuationAdoptionCheckpoint | undefined {
+	const checkpoint = runtime.adoptionCheckpoint;
+	runtime.adoptionCheckpoint = undefined;
+	return checkpoint;
+}
+
+export interface AdoptedContinuationCompactionOptions {
+	trigger: MidRunGuardTrigger;
+	continueAfterComplete: boolean;
+	sendContinuation: (prompt: string) => void;
+	onContinuationFailed?: (eventId: string) => void;
+	resumeStartTimeoutMs?: number;
+	compactionProofTimeoutMs?: number;
+}
+
+/**
+ * Take ownership of an over-threshold compaction Pi started on its own.
+ *
+ * Pi runs its automatic compaction at the end of a turn, where the package's
+ * mid-run guard never sees the context. Without adoption those checkpoints fall
+ * back to Pi's own summarizer and the session continues without a ledger or a
+ * same-session resume.
+ */
+export function startAdoptedContinuationCompaction(
+	ctx: ExtensionContext,
+	runtime: ContinuationRuntimeState,
+	options: AdoptedContinuationCompactionOptions,
+): string | undefined {
+	clearStaleAwaitingContinuationResume(runtime);
+	if (runtime.compactionRunning || hasActiveContinuationSettlement(runtime)) return undefined;
+	const event = beginContinuationEvent(
+		runtime,
+		"adopted-compaction",
+		options.trigger,
+		options.continueAfterComplete ? "pending" : "not-requested",
+	);
+	beginWorkingVisuals(ctx, runtime, event.id, "pi-continue saving handoff");
+	const label = sourceLabel("adopted-compaction");
+	notify(ctx, `${label}: saving handoff (${describeGuardTrigger(options.trigger)}).`, "info");
+	if (options.continueAfterComplete) {
+		preparePendingResumeDispatch(runtime, {
+			eventId: event.id,
+			label,
+			sendContinuation: options.sendContinuation,
+			onContinuationFailed: options.onContinuationFailed,
+			resumeStartTimeoutMs: options.resumeStartTimeoutMs ?? RESUME_START_TIMEOUT_MS,
+			compactionProofTimeoutMs: options.compactionProofTimeoutMs ?? RESUME_START_TIMEOUT_MS,
+			failureGuardKey: undefined,
+		});
+	}
+	return event.id;
+}
+
+/**
+ * Hand an adopted compaction back to Pi when the package could not build a usable handoff.
+ *
+ * Only state that still belongs to this event is cleared: a stale caller whose owner was
+ * already settled must not disturb a newer continuation.
+ */
+export function releaseAdoptedContinuationCompaction(
+	ctx: ExtensionContext,
+	runtime: ContinuationRuntimeState,
+	eventId: string,
+	onContinuationFailed?: (eventId: string) => void,
+): void {
+	if (!isActiveRunningContinuationEvent(runtime, eventId)) return;
+	const reason = compactionFailureReason(runtime, eventId);
+	onContinuationFailed?.(eventId);
+	if (runtime.pendingResumeDispatch?.eventId === eventId) clearPendingResumeDispatch(runtime);
+	if (runtime.awaitingResumeStart?.eventId === eventId) clearResumeStartTimeout(runtime);
+	if (runtime.awaitingResumeEventId === eventId) runtime.awaitingResumeEventId = undefined;
+	if (!finishContinuationEvent(runtime, eventId, "failed", reason)) return;
+	settleWorkingVisuals(ctx, runtime, eventId);
+	notify(ctx, `${sourceLabel("adopted-compaction")}: handoff failed: ${reason} Pi kept its own compaction.`, "warning");
 }
 
 export function markAwaitingContinuationResumeStarted(runtime: ContinuationRuntimeState): string | undefined {

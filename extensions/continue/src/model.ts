@@ -1,5 +1,5 @@
-import type { Api, Model, ModelThinkingLevel, ThinkingLevel } from "@earendil-works/pi-ai";
-import { clampThinkingLevel, completeSimple } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model, ModelThinkingLevel, SimpleStreamOptions, StopReason, ThinkingLevel } from "@earendil-works/pi-ai";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolveHistoryOutputBudget, resolveSummarizerModel } from "./model-settings.ts";
 import type { ContinuationConfig, ContinuationSynthesisFailureCode, PromptPassTelemetry } from "./types.ts";
@@ -8,6 +8,8 @@ export { resolveHistoryOutputBudget, resolveSummarizerModel } from "./model-sett
 
 export interface PromptPassResult extends PromptPassTelemetry {
 	text: string;
+	/** Provider stop reason for the pass; `length` means the artifact was cut off by the output budget. */
+	stopReason: StopReason;
 }
 
 export class PromptPassError extends Error {
@@ -80,6 +82,12 @@ export async function runPromptPass(
 	}
 	const requestedModel = `${model.provider}/${model.id}`;
 	const outputBudget = resolveHistoryOutputBudget(model, reserveTokens, config.historyMaxTokens);
+	// The provider owns the request: `streamSimple` maps one provider-neutral reasoning
+	// level onto each API's own thinking parameters.
+	const provider = ctx.modelRegistry.getProvider(model.provider);
+	if (!provider) {
+		throw new PromptPassError("model-unresolved", { requestedModel });
+	}
 	let auth: Awaited<ReturnType<ExtensionContext["modelRegistry"]["getApiKeyAndHeaders"]>>;
 	try {
 		auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
@@ -91,11 +99,22 @@ export async function runPromptPass(
 	}
 	const reasoning = resolveReasoningLevel(pi, model, config);
 	let httpStatus: number | undefined;
-	let response: Awaited<ReturnType<typeof completeSimple>>;
+	let response: AssistantMessage;
 	const promptPassAbort = createPromptPassAbortSignal(signal, config.synthesisTimeoutMs);
+	const requestOptions: SimpleStreamOptions = {
+		apiKey: auth.apiKey,
+		headers: auth.headers,
+		env: auth.env,
+		maxTokens: outputBudget.effectiveTokens,
+		signal: promptPassAbort.signal,
+		onResponse: (providerResponse) => {
+			httpStatus = providerResponse.status;
+		},
+	};
+	if (reasoning) requestOptions.reasoning = reasoning;
 	try {
-		response = await completeSimple(
-			model,
+		response = await provider.streamSimple(
+			auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model,
 			{
 				systemPrompt: prompt.systemPrompt,
 				messages: [
@@ -106,27 +125,8 @@ export async function runPromptPass(
 					},
 				],
 			},
-			reasoning
-				? {
-						apiKey: auth.apiKey,
-						headers: auth.headers,
-						maxTokens: outputBudget.effectiveTokens,
-						reasoning,
-						signal: promptPassAbort.signal,
-						onResponse: (providerResponse) => {
-							httpStatus = providerResponse.status;
-						},
-					}
-				: {
-						apiKey: auth.apiKey,
-						headers: auth.headers,
-						maxTokens: outputBudget.effectiveTokens,
-						signal: promptPassAbort.signal,
-						onResponse: (providerResponse) => {
-							httpStatus = providerResponse.status;
-						},
-					},
-		);
+			requestOptions,
+		).result();
 	} catch {
 		throw new PromptPassError(providerAbortCode(signal, promptPassAbort), { requestedModel, httpStatus });
 	} finally {
@@ -146,6 +146,7 @@ export async function runPromptPass(
 		.trim();
 	return {
 		text,
+		stopReason: response.stopReason,
 		requestedModel,
 		responseModel: response.responseModel,
 		responseId: response.responseId,

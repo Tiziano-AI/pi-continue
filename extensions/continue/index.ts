@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import { loadHistoryPromptAssets } from "./src/assets.ts";
 import { parseHistoryArtifacts } from "./src/blocks.ts";
 import { splitContinueSubcommand, shouldOpenContinuePalette } from "./src/command-shape.ts";
@@ -21,15 +21,15 @@ import {
 	recordContinuationSynthesisTelemetry,
 	recordOutputWriteResult,
 } from "./src/continuation-event.ts";
-import { buildContinuationDetails, buildContinuationSynthesisTelemetry, parseContinuationDetails } from "./src/details.ts";
-import { SYNTHESIS_ABORT_MESSAGE } from "./src/synthesis-error.ts";
+import { buildContinuationDetails, buildContinuationSynthesisTelemetry, combinePromptPassAttempts, parseContinuationDetails } from "./src/details.ts";
+import { describeSynthesisAbort } from "./src/synthesis-error.ts";
 import { buildLedgerSnapshot, createContinuationLedgerOverlayController } from "./src/ledger-viewer.ts";
-import { runMidRunGuard } from "./src/mid-run-guard.ts";
+import { decideAdoptedCompactionTrigger, runMidRunGuard } from "./src/mid-run-guard.ts";
 import { PromptPassError, runPromptPass } from "./src/model.ts";
 import { loadPiInternals } from "./src/pi-internals.ts";
-import { compileHistoryPrompt } from "./src/prompt.ts";
+import { compileHistoryPrompt, withArtifactRepairReminder } from "./src/prompt.ts";
 import { resolveProjectContext, writeNormalizedMarkdownFile } from "./src/project.ts";
-import { isContinuationPromptUserMessage } from "./src/prompt-dispatch.ts";
+import { isContinuationPromptUserMessage, sendContinuationPrompt } from "./src/prompt-dispatch.ts";
 import { showContinuePalette } from "./src/palette.ts";
 import {
 	CONTINUATION_PROMPT,
@@ -38,9 +38,16 @@ import {
 	createContinuationRuntimeState,
 	dispatchVerifiedContinuationResume,
 	failContinuationCompactionProof,
+	clearContinuationAdoptionCheckpoint,
+	consumeContinuationAdoptionCheckpoint,
 	failRunningAwaitingContinuationResume,
 	markAwaitingContinuationResumeStarted,
+	markContinuationCompactionComplete,
+	openContinuationAdoptionCheckpoint,
+	recordAssistantStopReason,
+	releaseAdoptedContinuationCompaction,
 	settleAwaitingContinuationResumeFromAssistant,
+	startAdoptedContinuationCompaction,
 	type ContinuationRuntimeState,
 	verifyContinuationCompactionProof,
 } from "./src/runtime.ts";
@@ -49,7 +56,7 @@ import {
 	NATIVE_COMPACTION_FALLBACK_FAILURE,
 	clearPendingResumeDispatch,
 } from "./src/resume-proof.ts";
-import type { AgentGuideWriteStatus, ContinuationSynthesisFailure, ContinuationSynthesisTelemetry, ParsedHistoryArtifacts, PendingOutputWrite, WriteMode } from "./src/types.ts";
+import type { AgentGuideWriteStatus, ContinuationSynthesisFailure, ContinuationSynthesisTelemetry, ParsedHistoryArtifacts, PendingOutputWrite, PromptPassTelemetry, WriteMode } from "./src/types.ts";
 import {
 	clearWorkingVisuals,
 	settleWorkingVisuals,
@@ -153,6 +160,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
+		// A new turn owns what happens next, so the previous checkpoint is no longer adoptable.
+		clearContinuationAdoptionCheckpoint(runtime);
 		if (event.prompt !== CONTINUATION_PROMPT) return;
 		const eventId = markAwaitingContinuationResumeStarted(runtime);
 		if (!eventId) return;
@@ -173,7 +182,14 @@ export default function (pi: ExtensionAPI) {
 		updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
 	});
 
+	pi.on("input", async (_event, _ctx) => {
+		// New user input means the next compaction belongs to that submission, not to a
+		// finished assistant turn, so it must not be adopted as an automatic checkpoint.
+		clearContinuationAdoptionCheckpoint(runtime);
+	});
+
 	pi.on("agent_end", async (_event, ctx) => {
+		openContinuationAdoptionCheckpoint(runtime);
 		const settlement = failRunningAwaitingContinuationResume(runtime, "Continuation resume did not produce an assistant response.");
 		if (settlement) {
 			settleWorkingVisuals(ctx, runtime, settlement.eventId);
@@ -184,6 +200,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("message_end", async (event, ctx) => {
 		if (!isAssistantMessage(event.message)) return;
+		recordAssistantStopReason(runtime, event.message.stopReason);
 		const settlement = settleAwaitingContinuationResumeFromAssistant(runtime, event.message);
 		if (!settlement) return;
 		settleWorkingVisuals(ctx, runtime, settlement.eventId);
@@ -193,21 +210,53 @@ export default function (pi: ExtensionAPI) {
 		await runMidRunGuard(pi, ctx, runtime, event.messages, (eventId) => cleanupPendingOutputWrites(eventId));
 	});
 
-	pi.on("session_before_compact", async (event, ctx) => {
+	async function prepareCompactionHandoff(
+		event: SessionBeforeCompactEvent,
+		ctx: ExtensionContext,
+		ownership: { adoptedEventId?: string },
+	) {
 		const sessionId = ctx.sessionManager.getSessionId();
-		const ownerEventId = getActiveContinuationEventId(runtime);
-		if (ownerEventId === undefined) return undefined;
-		const ownerStillActive = () => isActiveRunningContinuationEvent(runtime, ownerEventId);
-		const ownerLostResult = () => ownerStillActive() ? undefined : { cancel: true as const };
+		const startedEventId = getActiveContinuationEventId(runtime);
 		const projectContext = await resolveProjectContext(pi, ctx.cwd, sessionId);
-		const ownerLostAfterProjectContext = ownerLostResult();
-		if (ownerLostAfterProjectContext) return ownerLostAfterProjectContext;
 		const config = loadContinuationConfig(projectContext.projectRoot);
-		if (!config.enabled) return { cancel: true };
+		if (!config.enabled) return startedEventId === undefined ? undefined : { cancel: true };
+		const normalizedPreparation = normalizeCompactionPreparation(event.preparation, event.branchEntries);
+		// Pi runs its own compaction at the end of a turn, where the mid-run guard never
+		// sees the context. Owning that over-threshold checkpoint keeps the ledger and the
+		// same-session resume instead of silently falling back to Pi's summarizer.
+		const adoptedTrigger = startedEventId === undefined
+			? decideAdoptedCompactionTrigger({
+				config,
+				piCompactionEnabled: normalizedPreparation.settings.enabled,
+				contextWindow: ctx.model?.contextWindow,
+				reserveTokens: normalizedPreparation.settings.reserveTokens,
+				tokensBefore: normalizedPreparation.tokensBefore,
+				checkpoint: consumeContinuationAdoptionCheckpoint(runtime),
+				reason: event.reason,
+				now: Date.now(),
+			})
+			: undefined;
+		const adoptedEventId = adoptedTrigger
+			? startAdoptedContinuationCompaction(ctx, runtime, {
+				trigger: adoptedTrigger,
+				continueAfterComplete: true,
+				sendContinuation: (prompt) => sendContinuationPrompt(pi, prompt),
+				onContinuationFailed: (eventId) => cleanupPendingOutputWrites(eventId),
+			})
+			: undefined;
+		const ownerEventId = startedEventId ?? adoptedEventId;
+		if (ownerEventId === undefined) return undefined;
+		const adopted = adoptedEventId !== undefined;
+		if (adopted) ownership.adoptedEventId = adoptedEventId;
+		const ownerStillActive = () => isActiveRunningContinuationEvent(runtime, ownerEventId);
+		// A lost owner must never return package details. An owned handoff fails closed; an
+		// adopted checkpoint is handed back to the compaction Pi decided to run.
+		const ownerLostResult = () => ownerStillActive()
+			? undefined
+			: { stop: true as const, result: adopted ? undefined : { cancel: true as const } };
 		const resolvedProjectContext = await resolveProjectContext(pi, ctx.cwd, sessionId, config.agentGuidePath);
 		const ownerLostAfterResolvedContext = ownerLostResult();
-		if (ownerLostAfterResolvedContext) return ownerLostAfterResolvedContext;
-		const normalizedPreparation = normalizeCompactionPreparation(event.preparation, event.branchEntries);
+		if (ownerLostAfterResolvedContext) return ownerLostAfterResolvedContext.result;
 		if (normalizedPreparation.repairedProviderUnsafeSuffix && ctx.hasUI) {
 			ctx.ui.notify("pi-continue summarized a provider-unsafe kept suffix before resuming.", "warning");
 		} else if (normalizedPreparation.repairedNoOpCut && ctx.hasUI) {
@@ -223,7 +272,7 @@ export default function (pi: ExtensionAPI) {
 		const fileOpsSnapshot = snapshotFileOperations(preparation.fileOps);
 		const internals = await loadPiInternals();
 		const ownerLostAfterInternals = ownerLostResult();
-		if (ownerLostAfterInternals) return ownerLostAfterInternals;
+		if (ownerLostAfterInternals) return ownerLostAfterInternals.result;
 		const messagesToSummarize = preparation.messagesToSummarize;
 		const turnPrefixMessages = preparation.turnPrefixMessages;
 		const turnPrefixTranscript = preparation.isSplitTurn && turnPrefixMessages.length > 0
@@ -250,29 +299,54 @@ export default function (pi: ExtensionAPI) {
 		let historyArtifacts: ParsedHistoryArtifacts;
 		let synthesis: ContinuationSynthesisTelemetry | undefined;
 		try {
-			const historyOutput = await runPromptPass(pi, ctx, config, historyPrompt, preparation.settings.reserveTokens, event.signal);
+			let attempt = await runPromptPass(pi, ctx, config, historyPrompt, preparation.settings.reserveTokens, event.signal);
 			const ownerLostAfterSynthesis = ownerLostResult();
-			if (ownerLostAfterSynthesis) return ownerLostAfterSynthesis;
-			synthesis = buildContinuationSynthesisTelemetry(historyOutput);
+			if (ownerLostAfterSynthesis) return ownerLostAfterSynthesis.result;
+			let passTelemetry: PromptPassTelemetry = attempt;
+			synthesis = buildContinuationSynthesisTelemetry(passTelemetry);
 			recordContinuationSynthesisTelemetry(runtime, ownerEventId, synthesis);
-			const parsedHistoryArtifacts = parseHistoryArtifacts(historyOutput.text);
+			let parsedHistoryArtifacts = parseHistoryArtifacts(attempt.text);
 			if (!parsedHistoryArtifacts.ok) {
+				// One bounded retry. Reminding the model of the artifact contract recovers
+				// prose answers and mixed wrappers, and disabling reasoning for the retry
+				// leaves the whole output budget for the artifact when the first attempt
+				// spent it on reasoning tokens.
+				attempt = await runPromptPass(
+					pi,
+					ctx,
+					{ ...config, reasoning: "off" },
+					withArtifactRepairReminder(historyPrompt),
+					preparation.settings.reserveTokens,
+					event.signal,
+				);
+				const ownerLostAfterRepair = ownerLostResult();
+				if (ownerLostAfterRepair) return ownerLostAfterRepair.result;
+				passTelemetry = combinePromptPassAttempts(passTelemetry, attempt);
+				synthesis = buildContinuationSynthesisTelemetry(passTelemetry);
+				recordContinuationSynthesisTelemetry(runtime, ownerEventId, synthesis);
+				parsedHistoryArtifacts = parseHistoryArtifacts(attempt.text);
+			}
+			if (!parsedHistoryArtifacts.ok) {
+				const truncated = attempt.stopReason === "length";
 				throw new ArtifactParseError({
-					kind: "artifact-parse-validation",
-					code: parsedHistoryArtifacts.code,
+					kind: truncated ? "model-provider-call" : "artifact-parse-validation",
+					code: truncated ? "provider-truncated" : parsedHistoryArtifacts.code,
 					pass: "history",
-					requestedModel: historyOutput.requestedModel,
-					httpStatus: historyOutput.httpStatus,
+					requestedModel: attempt.requestedModel,
+					httpStatus: attempt.httpStatus,
 				});
 			}
 			historyArtifacts = parsedHistoryArtifacts.artifacts;
 			markContinuationArtifact(runtime, ownerEventId, "modeled", undefined);
 		} catch (error) {
 			if (ownerStillActive()) {
-				recordContinuationSynthesisFailure(runtime, ownerEventId, normalizeSynthesisFailure(error));
-				markContinuationArtifact(runtime, ownerEventId, "aborted", SYNTHESIS_ABORT_MESSAGE);
+				const failure = normalizeSynthesisFailure(error);
+				recordContinuationSynthesisFailure(runtime, ownerEventId, failure);
+				markContinuationArtifact(runtime, ownerEventId, "aborted", describeSynthesisAbort(failure));
 			}
-			return { cancel: true };
+			if (!adopted) return { cancel: true };
+			releaseAdoptedContinuationCompaction(ctx, runtime, ownerEventId, (eventId) => cleanupPendingOutputWrites(eventId));
+			return undefined;
 		}
 		const continuationArtifactWriteId = config.continuationArtifactMode === "always" ? randomUUID() : undefined;
 		if (continuationArtifactWriteId) {
@@ -316,6 +390,9 @@ export default function (pi: ExtensionAPI) {
 			synthesis,
 			ownerEventId,
 		);
+		// Pi owns this compaction, so there is no package compact callback to report
+		// completion. Arming the proof gate here keeps resume behind Pi's saved entry.
+		if (adopted) markContinuationCompactionComplete(ctx, runtime, ownerEventId);
 		return {
 			compaction: {
 				summary: composeCompactionSummary(historyArtifacts.briefMarkdown, details, {
@@ -328,6 +405,34 @@ export default function (pi: ExtensionAPI) {
 				details,
 			},
 		};
+	}
+
+	let compactionHandoffInFlight = false;
+
+	pi.on("session_before_compact", async (event, ctx) => {
+		// One compaction at a time: a second operation entering while a handoff is being
+		// prepared is cancelled rather than allowed to summarize and save the same branch in
+		// parallel with it.
+		if (compactionHandoffInFlight) return { cancel: true };
+		// The package-owned request aborts the active run, and Pi reads that aborted turn as a
+		// reason to start its own threshold or overflow compaction. Both operations would then
+		// summarize the same branch, and whichever loses the save fails with "Already compacted".
+		// The package-owned request arrives as `manual` and stays the single owner until it settles.
+		if (runtime.compactionRunning && event.reason !== "manual") return { cancel: true };
+		compactionHandoffInFlight = true;
+		const ownership: { adoptedEventId?: string } = {};
+		try {
+			return await prepareCompactionHandoff(event, ctx, ownership);
+		} catch (error) {
+			// Pi swallows handler failures and continues with its own summarizer, so the event
+			// this handler adopted is released instead of waiting for proof that never arrives.
+			const adoptedEventId = ownership.adoptedEventId;
+			if (adoptedEventId === undefined || !isActiveRunningContinuationEvent(runtime, adoptedEventId)) throw error;
+			releaseAdoptedContinuationCompaction(ctx, runtime, adoptedEventId, (eventId) => cleanupPendingOutputWrites(eventId));
+			return undefined;
+		} finally {
+			compactionHandoffInFlight = false;
+		}
 	});
 
 	pi.on("session_compact", async (event, ctx) => {

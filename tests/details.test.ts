@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildContinuationDetails, buildContinuationSynthesisTelemetry, parseContinuationDetails, renderContinuationDetails } from "../extensions/continue/src/details.ts";
+import { buildContinuationDetails, buildContinuationSynthesisTelemetry, combinePromptPassAttempts, parseContinuationDetails, renderContinuationDetails } from "../extensions/continue/src/details.ts";
 
 const outputBudget = {
 	source: "pi-default" as const,
@@ -49,6 +49,20 @@ test("buildContinuationDetails records current file operations only", () => {
 	assert.equal(details.synthesis?.history?.httpStatus, 200);
 	assert.deepEqual(details.synthesis?.history?.outputBudget, outputBudget);
 	assert.equal(details.synthesis?.totalTokens, 33);
+});
+
+test("combinePromptPassAttempts reports both synthesis attempts", () => {
+	const retry = {
+		...historyTelemetry,
+		responseId: "resp-2",
+		usage: { input: 5, output: 7, cacheRead: 0, cacheWrite: 1, totalTokens: 13, costTotal: 0.002 },
+	};
+
+	assert.deepEqual(combinePromptPassAttempts(undefined, retry), retry);
+	assert.deepEqual(combinePromptPassAttempts(historyTelemetry, retry), {
+		...retry,
+		usage: { input: 15, output: 27, cacheRead: 1, cacheWrite: 3, totalTokens: 46, costTotal: 0.003 },
+	});
 });
 
 test("buildContinuationSynthesisTelemetry stores only allowlisted telemetry", () => {

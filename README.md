@@ -30,7 +30,7 @@ pi -e /absolute/path/to/pi-continue
 
 Pi packages run with your local user permissions. Review package source before installing third-party packages.
 
-Requires Pi `0.74.0` or newer, where model-specific thinking support is described by `thinkingLevelMap`.
+Requires Pi `0.81.0` or newer, the release that both reports the compaction trigger (`reason`) to extensions and exposes the summarizer model's provider through `ctx.modelRegistry.getProvider()`. Developed and tested against Pi `0.84.3`.
 
 ## Use `/continue`
 
@@ -70,6 +70,20 @@ It:
 - verifies Pi saved a package-owned `pi-continue/v4` compaction entry
 - sends the same-session resume prompt only after that proof
 
+Pi also runs its own compaction at the end of a turn, where this guard never sees the context. With `adoptNativeCompaction` enabled (the default), `pi-continue` owns that checkpoint too: it saves the Continuation Ledger for Pi's over-threshold compaction and resumes the same session after package-owned proof.
+
+Adoption requires Pi's own threshold trigger plus the single checkpoint opened when an assistant turn ends on its own, and only the first over-threshold compaction can claim it. These compactions stay with Pi's native summarizer:
+
+- a `/compact` request, instructed or not, because Pi reports it as a manual compaction
+- context-overflow recovery, which Pi retries itself
+- any compaction that does not directly follow a finished assistant turn, including one Pi runs while new user input is submitted, because that submission already drives the next turn
+- a cancelled turn
+- any adopted checkpoint whose ledger cannot be built; it is handed back to Pi instead of cancelling the compaction
+
+Set `adoptNativeCompaction` to `false` to keep every Pi-initiated compaction native.
+
+One handoff owns the branch at a time. A package-owned request stops the active run, and Pi can read that stopped run as its own reason to compact; while the package-owned request is in flight, `pi-continue` cancels the automatic compaction Pi starts on its own instead of letting both operations summarize the same branch. If another compaction, such as a `/compact` request, still saves the package-owned handoff first, `pi-continue` resumes from Pi's saved handoff proof rather than failing a continuation Pi already stored.
+
 The threshold belongs to Pi, not this package:
 
 ```text
@@ -96,7 +110,7 @@ Use `/continue status` after a continuation to see what happened. Status reports
 
 A model's context window and maximum output budget are independent. `pi-continue` derives the history budget from Pi's reserve-token setting or `historyMaxTokens`, then clamps the provider request to the selected summarizer model's positive max-output limit when that limit is known.
 
-If modeled Continuation Ledger creation fails, or if Pi reports native/invalid/mismatched compaction proof for an active continuation, `pi-continue` stops before resuming and writes no guessed continuation artifact or agent guide. Run `/continue status`, inspect the failure, use `/continue preview` after prompt or config changes, fix the model/auth/context issue, then retry when Pi is idle.
+A complete ledger is still read when the model wraps it in Markdown fences, reasoning tags, or surrounding prose, while a response carrying competing artifacts fails closed. When the first response is not usable, one retry runs with an explicit format reminder and reasoning disabled, so an answer that spent the output budget on reasoning tokens gets a second, full budget for the artifact. If modeled Continuation Ledger creation still fails, or if Pi reports native/invalid/mismatched compaction proof for an active continuation, `pi-continue` stops before resuming and writes no guessed continuation artifact or agent guide. Run `/continue status`, inspect the failure, use `/continue preview` after prompt or config changes, fix the model/auth/context issue, then retry when Pi is idle.
 
 ## Configuration
 
@@ -125,6 +139,7 @@ Default package config:
   "agentGuidePath": "AGENTS.md",
   "agentGuideSyncMode": "off",
   "midRunGuardEnabled": true,
+  "adoptNativeCompaction": true,
   "appendCompactionMetadata": false,
   "appendReadFileTags": false,
   "appendModifiedFileTags": true,
@@ -139,13 +154,14 @@ Common settings:
 | --- | --- |
 | `enabled` | Turns package behavior on or off. |
 | `midRunGuardEnabled` | Enables automatic mid-run continuation. |
+| `adoptNativeCompaction` | `true` by default; owns the over-threshold compaction Pi starts right after a finished assistant turn, so end-of-turn automatic compaction also saves a Continuation Ledger and resumes. `/compact` requests, compaction while new user input is submitted, cancelled turns, and context-overflow recovery keep Pi's own summarizer. |
 | `summarizerModel` | Uses the active Pi model with `"inherit"`, or a pinned `"provider/model"`. |
 | `reasoning` | Uses Pi's setting with `"inherit"`, or a model-supported thinking level. Unsupported levels are hidden in settings and clamped through Pi's `thinkingLevelMap`. |
 | `historyMaxTokens` | Optional requested history output-token budget; `null` uses Pi-derived default. The effective provider request is clamped to the summarizer model's positive max-output limit when known. |
-| `synthesisTimeoutMs` | Maximum time for the modeled Continuation Ledger pass before `pi-continue` cancels the handoff instead of leaving Pi in the native compacting loader. Default: `180000` ms. |
+| `synthesisTimeoutMs` | Maximum time for each modeled Continuation Ledger pass, including the single format-reminder retry, before `pi-continue` cancels the handoff instead of leaving Pi in the native compacting loader. Default: `180000` ms. |
 | `continuationArtifactMode` | `"always"` by default writes the rendered brief after successful package-owned compaction to `<project-root>/.pi/continue/<encoded-session-id>.md`; `"off"` disables that artifact. The artifact is human-inspection/manual-bootstrap output only and is never automatic prompt input. |
 | `agentGuidePath` | Repo-relative path for optional full guide replacement; default `"AGENTS.md"`. |
-| `agentGuideSyncMode` | `"off"` by default; `"always"` allows configured agent-guide replacement only when the artifact includes full guide content. |
+| `agentGuideSyncMode` | `"off"` by default; `"always"` allows configured agent-guide replacement only when the artifact includes full guide content and the reason for replacing it. |
 | `appendCompactionMetadata` | `false` by default; when true, appends compact non-path metadata to the compaction summary. |
 | `appendReadFileTags` | `false` by default; when true, appends current compaction read-file tags. |
 | `appendModifiedFileTags` | `true` by default; when true, appends current compaction modified-file tags. |
@@ -231,7 +247,7 @@ What can change:
 - `continuationArtifactMode: "off"` writes no continuation artifact.
 - `showAfterCompact: true` (default) surfaces the rendered brief in a TUI overlay right after compaction completes and reuses the latest panel for repeated displays; set `false` for a silent handoff.
 - `agentGuideSyncMode: "off"` is the default.
-- `agentGuideSyncMode: "always"` writes only a full non-null `agentGuideUpdate.content` replacement to the configured agent-guide path.
+- `agentGuideSyncMode: "always"` writes only a full non-null `agentGuideUpdate.content` replacement, paired with its `agentGuideUpdate.reason`, to the configured agent-guide path.
 - Writes are normalized and skipped when content is unchanged.
 
 In this repository, `.pi/`, `CONTINUE.md`, `PLAN.md`, `AGENTS.md`, `ARCH.md`, and `VISION.md` are ignored local state. The npm package keeps README as its only top-level operator guide; it still ships the changelog, examples, and prompt Markdown assets. Automatic AGENTS.md writes remain off by default.

@@ -4,6 +4,29 @@ All notable changes to `pi-continue` are documented here.
 
 ## Unreleased
 
+### Added
+
+- `adoptNativeCompaction` (default `true`) lets `pi-continue` own the over-threshold compaction Pi starts after a finished assistant turn, so end-of-turn automatic compaction also saves a Continuation Ledger and resumes the same session. Adoption requires Pi's own threshold trigger and the single checkpoint an ending turn opens: a `/compact` request, compaction while new user input is submitted, cancelled turns, and context-overflow recovery keep Pi's native summarizer, and an adopted checkpoint whose ledger cannot be built is handed back to Pi instead of cancelling the compaction. Set the key to `false` to keep every Pi-initiated compaction native.
+- `max` is now a selectable `reasoning` level, matching Pi's current thinking levels.
+
+### Fixed
+
+- Automatic continuation no longer stops contributing after Pi's own threshold compaction wins a checkpoint; previously those compactions were saved natively with no ledger and no resume.
+- Read a complete Continuation Ledger through model presentation wrappers such as Markdown fences, reasoning tags, and surrounding prose; the artifact must still satisfy the full v4 contract, and a response carrying competing artifacts still fails closed.
+- Retried modeled Continuation Ledger synthesis once with an explicit format reminder and reasoning disabled, so responses that answered with prose or spent the output budget on reasoning tokens no longer cancel the handoff.
+- Ignored unknown artifact keys and read an omitted or unexplained `agentGuideUpdate` as no replacement, so guide writes still require complete, explained model content.
+- Reported the bounded failure classifier with the handoff failure message, including a new classifier for responses truncated at the output token limit.
+- Reported the combined token usage and cost of both synthesis attempts instead of only the last one.
+- Let Pi's compaction operation own active-run cancellation, preventing a competing auto-compaction from causing a low-probability `Already compacted` handoff failure.
+- Kept one owner for the branch after that cancellation: Pi reads the run its own compaction operation stopped as an errored over-threshold turn and starts an automatic compaction of the same branch, so the automatic compaction is now cancelled while a package-owned request is in flight. Previously the two operations summarized the same branch in parallel, the package-owned request lost the save with `Compaction failed: Already compacted`, and the automatic continuation reported `handoff failed` even though the Continuation Ledger had been saved.
+- Resumed from a Continuation Ledger Pi already saved and reported for the active continuation when the package's own compaction request then fails, instead of settling a stored handoff as a failed continuation with no resume.
+- Kept `/compact` requests and context-overflow recovery with Pi's own summarizer by reading the compaction trigger Pi reports, so a bare `/compact` right after a finished assistant turn no longer claims the adoption checkpoint.
+
+### Changed
+
+- Requires Pi `0.81.0` or newer, the release that reports the compaction trigger (`reason`) to extensions and exposes the summarizer model's provider through `ctx.modelRegistry.getProvider()`; the package is developed and tested against Pi `0.84.3`.
+- Ran modeled Continuation Ledger synthesis through the summarizer model's own provider (`ctx.modelRegistry.getProvider(...).streamSimple(...)`) with resolved API key, headers, base URL, and provider environment, replacing the global `completeSimple` entry point Pi no longer exports. Provider-neutral reasoning levels are still mapped by Pi.
+
 ## 0.9.3 - 2026-07-08
 
 ### Changed

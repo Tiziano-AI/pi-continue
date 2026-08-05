@@ -37,16 +37,16 @@
     "extensions/"
   ],
   "scripts": {
-    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test": "node --experimental-strip-types --test --test-timeout=60000 tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "check:json": "node -e \"const fs=require('node:fs'); for (const f of ['package.json', ...fs.readdirSync('examples').filter((name) => name.endsWith('.json')).map((name) => 'examples/' + name)]) JSON.parse(fs.readFileSync(f, 'utf8'));\"",
     "check:pack": "npm pack --dry-run --json --ignore-scripts >/dev/null",
     "gate": "pnpm run typecheck && pnpm test && pnpm run check:json && pnpm run check:pack"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.74.0",
-    "@earendil-works/pi-coding-agent": ">=0.74.0",
-    "@earendil-works/pi-tui": ">=0.74.0"
+    "@earendil-works/pi-ai": ">=0.81.0",
+    "@earendil-works/pi-coding-agent": ">=0.81.0",
+    "@earendil-works/pi-tui": ">=0.81.0"
   },
   "pi": {
     "extensions": [
@@ -55,9 +55,9 @@
     "image": "https://raw.githubusercontent.com/Tiziano-AI/pi-continue/v0.9.3/assets/gallery/pi-continue-gallery.webp"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.74.0",
-    "@earendil-works/pi-coding-agent": "^0.74.0",
-    "@earendil-works/pi-tui": "^0.74.0",
+    "@earendil-works/pi-ai": "^0.84.3",
+    "@earendil-works/pi-coding-agent": "^0.84.3",
+    "@earendil-works/pi-tui": "^0.84.3",
     "@types/node": "^25.6.1",
     "typescript": "^6.0.3"
   }

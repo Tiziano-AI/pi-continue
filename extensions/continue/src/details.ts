@@ -187,6 +187,25 @@ function clonePromptPassTelemetry(telemetry: PromptPassTelemetry | undefined): P
 	};
 }
 
+/** Fold an extra synthesis attempt into the reported pass usage so retries are not under-reported. */
+export function combinePromptPassAttempts(
+	previous: PromptPassTelemetry | undefined,
+	latest: PromptPassTelemetry,
+): PromptPassTelemetry {
+	if (!previous) return latest;
+	return {
+		...latest,
+		usage: {
+			input: previous.usage.input + latest.usage.input,
+			output: previous.usage.output + latest.usage.output,
+			cacheRead: previous.usage.cacheRead + latest.usage.cacheRead,
+			cacheWrite: previous.usage.cacheWrite + latest.usage.cacheWrite,
+			totalTokens: previous.usage.totalTokens + latest.usage.totalTokens,
+			costTotal: previous.usage.costTotal + latest.usage.costTotal,
+		},
+	};
+}
+
 export function buildContinuationSynthesisTelemetry(
 	history: PromptPassTelemetry | undefined,
 ): ContinuationSynthesisTelemetry | undefined {

@@ -92,6 +92,41 @@ test("parseHistoryArtifacts accepts the current v4 structured JSON artifact cont
 	});
 });
 
+test("parseHistoryArtifacts accepts one JSON Markdown fence around a valid artifact", () => {
+	const wrapped = [
+		"Here is the requested handoff:",
+		"```JSON",
+		validArtifacts,
+		"```",
+		"",
+		"No other content belongs to the artifact.",
+	].join("\n");
+
+	assert.equal(parseOk(wrapped).briefMarkdown, parseOk(validArtifacts).briefMarkdown);
+});
+
+test("parseHistoryArtifacts reads a valid artifact through model presentation wrappers", () => {
+	const fenced = (language: string) => ["```" + language, validArtifacts, "```"].join("\n");
+	const expected = parseOk(validArtifacts).briefMarkdown;
+	assert.equal(parseOk(fenced("typescript")).briefMarkdown, expected);
+	assert.equal(parseOk([fenced("typescript"), fenced("json")].join("\n")).briefMarkdown, expected);
+	assert.equal(parseOk(`<think>\nThe contract wants one JSON object.\n</think>\n\n${validArtifacts}`).briefMarkdown, expected);
+	assert.equal(parseOk(`Here is the handoff:\n\n${validArtifacts}\n\nTell me if anything else is needed.`).briefMarkdown, expected);
+});
+
+test("parseHistoryArtifacts still fails closed on unusable model output", () => {
+	parseFail("I was unable to summarize this session.", "artifact-invalid-json");
+	parseFail(validArtifacts.slice(0, Math.floor(validArtifacts.length / 2)), "artifact-invalid-json");
+	parseFail(`Here is the handoff:\n\n${JSON.stringify(envelope({ brief: { task: "only a task" } }))}`);
+});
+
+test("parseHistoryArtifacts fails closed when a response carries competing artifacts", () => {
+	const other = JSON.stringify(envelope({
+		brief: briefEnvelope({ task: "A different task than the final artifact claims." }),
+	}));
+	parseFail(["```json", validArtifacts, "```", "", "```json", other, "```"].join("\n"), "artifact-ambiguous");
+});
+
 test("parseHistoryArtifacts renders only populated brief sections", () => {
 	const parsed = parseOk(JSON.stringify(envelope({
 		brief: briefEnvelope({ forbid: [], established: [], learned: [], open: [], next: [] }),
@@ -110,25 +145,36 @@ test("parseHistoryArtifacts accepts a full agent guide replacement", () => {
 	assert.equal(parsed.agentGuideChangeReason, "capture corrected command truth");
 });
 
-test("parseHistoryArtifacts rejects wrong top-level keys", () => {
-	parseFail(JSON.stringify({
+test("parseHistoryArtifacts ignores unknown envelope, brief, and entry keys", () => {
+	const expected = parseOk(validArtifacts).briefMarkdown;
+	assert.equal(parseOk(JSON.stringify({
 		version: "pi-continue-artifacts/v4",
-		brief: briefEnvelope(),
-		agentGuideUpdate: { content: null, reason: "ok" },
-		extra: "noise",
-	}));
+		brief: { ...briefEnvelope(), commentary: ["noise"] },
+		agentGuideUpdate: { content: null, reason: "no durable guide change this cycle", confidence: 0.4 },
+		notes: "noise",
+	})).briefMarkdown, expected);
+	assert.equal(parseOk(JSON.stringify(envelope({
+		brief: briefEnvelope({
+			learned: [{
+				lesson: "Embedded newlines inside a field should render as one bullet entry.",
+				source: "parser normalization fixture",
+				confidence: "high",
+			}],
+		}),
+	}))).briefMarkdown, expected);
 });
 
-test("parseHistoryArtifacts rejects wrong brief keys", () => {
-	parseFail(JSON.stringify(envelope({
-		brief: { ...briefEnvelope(), extraSlot: ["nope"] },
-	})));
-});
+test("parseHistoryArtifacts requires the version and every brief slot", () => {
+	const versionless = envelope();
+	delete (versionless as Record<string, unknown>).version;
+	parseFail(JSON.stringify(versionless));
 
-test("parseHistoryArtifacts rejects a brief missing the learned slot", () => {
-	const noLearned = briefEnvelope();
-	delete (noLearned as Record<string, unknown>).learned;
-	parseFail(JSON.stringify(envelope({ brief: noLearned })));
+	for (const slot of ["forbid", "established", "learned", "open", "next"]) {
+		const partialBrief = briefEnvelope();
+		delete (partialBrief as Record<string, unknown>)[slot];
+		parseFail(JSON.stringify(envelope({ brief: partialBrief })));
+		parseFail(JSON.stringify(envelope({ brief: briefEnvelope({ [slot]: null }) })));
+	}
 });
 
 test("parseHistoryArtifacts rejects empty task or done_when", () => {
@@ -184,12 +230,6 @@ test("parseHistoryArtifacts rejects learned entries missing fields", () => {
 	})));
 });
 
-test("parseHistoryArtifacts rejects learned entries with extra keys", () => {
-	parseFail(JSON.stringify(envelope({
-		brief: briefEnvelope({ learned: [{ lesson: "ok", source: "user@msg-1", evidence: "noise" }] }),
-	})));
-});
-
 test("parseHistoryArtifacts rejects open entries missing fields", () => {
 	parseFail(JSON.stringify(envelope({
 		brief: briefEnvelope({ open: [{ question: "ok" }] }),
@@ -208,28 +248,30 @@ test("parseHistoryArtifacts rejects next entries missing fields", () => {
 	})));
 });
 
-test("parseHistoryArtifacts rejects agentGuideUpdate with wrong keys", () => {
-	parseFail(JSON.stringify(envelope({
-		agentGuideUpdate: { content: null, reason: "ok", extra: true },
-	})));
-	parseFail(JSON.stringify(envelope({
-		agentGuideUpdate: { reason: "missing content" },
-	})));
+test("parseHistoryArtifacts reads an incomplete agentGuideUpdate as no replacement", () => {
+	const noReplacement = (agentGuideUpdate: unknown) => {
+		const payload = envelope({ agentGuideUpdate });
+		if (agentGuideUpdate === undefined) delete (payload as Record<string, unknown>).agentGuideUpdate;
+		const parsed = parseOk(JSON.stringify(payload));
+		assert.equal(parsed.agentGuideMd, undefined);
+		assert.equal(parsed.agentGuideChangeReason, "The handoff model returned no agent guide replacement.");
+	};
+
+	noReplacement(undefined);
+	noReplacement(null);
+	noReplacement({ reason: "" });
+	noReplacement({ content: "   ", reason: null });
 });
 
-test("parseHistoryArtifacts rejects agentGuideUpdate.content empty string", () => {
-	parseFail(JSON.stringify(envelope({
-		agentGuideUpdate: { content: "   ", reason: "empty content rejected" },
+test("parseHistoryArtifacts never schedules an unexplained guide replacement", () => {
+	const parsed = parseOk(JSON.stringify(envelope({
+		agentGuideUpdate: { content: "# AGENTS\n" },
 	})));
-});
-
-test("parseHistoryArtifacts rejects empty agentGuideUpdate.reason", () => {
-	parseFail(JSON.stringify(envelope({
-		agentGuideUpdate: { content: null, reason: "" },
-	})));
-	parseFail(JSON.stringify(envelope({
-		agentGuideUpdate: { content: null, reason: null },
-	})));
+	assert.equal(parsed.agentGuideMd, undefined);
+	assert.equal(
+		parsed.agentGuideChangeReason,
+		"The handoff model returned an agent guide replacement without a reason, so no guide write was scheduled.",
+	);
 });
 
 test("parseHistoryArtifacts collapses multi-line and embedded-bullet field values to single lines", () => {
