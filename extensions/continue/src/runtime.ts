@@ -15,6 +15,7 @@ import type {
 	ContinuationLedgerSnapshot,
 	ContinuationResumeStatus,
 	MidRunGuardTrigger,
+	NativeCompactionAdoptionCheckpoint,
 } from "./types.ts";
 import {
 	clearPendingResumeDispatch,
@@ -30,14 +31,15 @@ import {
 } from "./working-ui.ts";
 
 export { CONTINUATION_PROMPT } from "./continuation-prompt.ts";
-export { acceptContinuationCompactionProof, armDeferredResumeStartTimeout, clearResumeStartTimeout, dispatchVerifiedContinuationResume, failContinuationCompactionProof, verifyContinuationCompactionProof } from "./resume-proof.ts";
+export { acceptContinuationCompactionProof, armDeferredResumeStartTimeout, clearResumeStartTimeout, dispatchVerifiedContinuationResume, failContinuationCompactionProof, markContinuationCompactionComplete, verifyContinuationCompactionProof } from "./resume-proof.ts";
 
 export type ContinuationRequestMode = "steer" | "queue";
-export type ContinuationRequestSource = ContinuationEventSource;
+export type ContinuationRequestSource = Exclude<ContinuationEventSource, "adopted-compaction">;
 
 export interface ContinuationRuntimeState extends ResumeProofRuntimeState {
 	latestLedger: ContinuationLedgerSnapshot | undefined;
 	lastNoCompactableGuardKey: string | undefined;
+	nativeCompactionAdoptionCheckpoint: NativeCompactionAdoptionCheckpoint | undefined;
 }
 
 export interface ContinuationRequest {
@@ -51,6 +53,13 @@ export interface StartContinuationCompactionOptions {
 	trigger: MidRunGuardTrigger | undefined;
 	abortActiveRun: boolean;
 	continueAfterComplete: boolean;
+	sendContinuation: (prompt: string) => void;
+	onContinuationFailed?: (eventId: string) => void;
+	resumeStartTimeoutMs?: number;
+	compactionProofTimeoutMs?: number;
+}
+
+export interface StartAdoptedNativeCompactionOptions {
 	sendContinuation: (prompt: string) => void;
 	onContinuationFailed?: (eventId: string) => void;
 	resumeStartTimeoutMs?: number;
@@ -109,6 +118,7 @@ export function createContinuationRuntimeState(): ContinuationRuntimeState {
 		pendingResumeDispatch: undefined,
 		latestLedger: undefined,
 		lastNoCompactableGuardKey: undefined,
+		nativeCompactionAdoptionCheckpoint: undefined,
 		latestEvent: undefined,
 		activeEventId: undefined,
 		nextEventSequence: 0,
@@ -122,6 +132,28 @@ export function getLatestContinuationEvent(runtime: ContinuationRuntimeState): C
 
 export function getLatestContinuationLedger(runtime: ContinuationRuntimeState): ContinuationLedgerSnapshot | undefined {
 	return runtime.latestLedger;
+}
+
+/** 只在助手正常结束后开放一次紧邻的阈值压缩资格。 */
+export function recordNativeCompactionAdoptionCheckpoint(
+	runtime: ContinuationRuntimeState,
+	stopReason: string,
+): void {
+	runtime.nativeCompactionAdoptionCheckpoint = stopReason === "stop"
+		? { stopReason, openedAt: Date.now() }
+		: undefined;
+}
+
+export function clearNativeCompactionAdoptionCheckpoint(runtime: ContinuationRuntimeState): void {
+	runtime.nativeCompactionAdoptionCheckpoint = undefined;
+}
+
+export function consumeNativeCompactionAdoptionCheckpoint(
+	runtime: ContinuationRuntimeState,
+): NativeCompactionAdoptionCheckpoint | undefined {
+	const checkpoint = runtime.nativeCompactionAdoptionCheckpoint;
+	runtime.nativeCompactionAdoptionCheckpoint = undefined;
+	return checkpoint;
 }
 
 export function describeGuardTrigger(trigger: MidRunGuardTrigger): string {
@@ -193,6 +225,49 @@ function compactionFailureReason(runtime: ContinuationRuntimeState, eventId: str
 	const event = runtime.latestEvent;
 	if (event?.id === eventId && event.artifactStatus === "aborted" && event.failureReason) return event.failureReason;
 	return COMPACTION_FAILURE;
+}
+
+/** 接管 Pi 已发起的阈值压缩，不再调用压缩或中止当前运行。 */
+export function startAdoptedNativeCompaction(
+	ctx: ExtensionContext,
+	runtime: ContinuationRuntimeState,
+	options: StartAdoptedNativeCompactionOptions,
+): string | undefined {
+	clearStaleAwaitingContinuationResume(runtime);
+	if (runtime.compactionRunning || hasActiveContinuationSettlement(runtime)) return undefined;
+	const event = beginContinuationEvent(runtime, "adopted-compaction", undefined, "pending");
+	const label = "adopted Pi threshold compaction";
+	preparePendingResumeDispatch(runtime, {
+		eventId: event.id,
+		label,
+		sendContinuation: options.sendContinuation,
+		onContinuationFailed: options.onContinuationFailed,
+		resumeStartTimeoutMs: options.resumeStartTimeoutMs ?? RESUME_START_TIMEOUT_MS,
+		compactionProofTimeoutMs: options.compactionProofTimeoutMs ?? RESUME_START_TIMEOUT_MS,
+		failureGuardKey: undefined,
+	});
+	beginWorkingVisuals(ctx, runtime, event.id, "pi-continue adopting Pi threshold compaction");
+	notify(ctx, `${label}: synthesizing handoff.`, "info");
+	return event.id;
+}
+
+/** 释放采用所有权，让同一次 Pi 事件继续使用原生摘要器。 */
+export function releaseAdoptedNativeCompaction(
+	ctx: ExtensionContext,
+	runtime: ContinuationRuntimeState,
+	eventId: string,
+	reason: string,
+	onContinuationFailed?: (eventId: string) => void,
+): boolean {
+	if (!isActiveRunningContinuationEvent(runtime, eventId)) return false;
+	onContinuationFailed?.(eventId);
+	finishContinuationEvent(runtime, eventId, "failed", reason);
+	clearPendingResumeDispatch(runtime);
+	clearResumeStartTimeout(runtime);
+	runtime.awaitingResumeEventId = undefined;
+	settleWorkingVisuals(ctx, runtime, eventId);
+	notify(ctx, "pi-continue adoption failed; Pi native compaction will continue.", "warning");
+	return true;
 }
 
 /** Start the package-owned compaction pipeline once, with visible lifecycle settlement. */

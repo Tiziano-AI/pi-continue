@@ -125,6 +125,7 @@ Default package config:
   "agentGuidePath": "AGENTS.md",
   "agentGuideSyncMode": "off",
   "midRunGuardEnabled": true,
+  "adoptNativeCompaction": false,
   "appendCompactionMetadata": false,
   "appendReadFileTags": false,
   "appendModifiedFileTags": true,
@@ -139,6 +140,7 @@ Common settings:
 | --- | --- |
 | `enabled` | Turns package behavior on or off. |
 | `midRunGuardEnabled` | Enables automatic mid-run continuation. |
+| `adoptNativeCompaction` | `false` by default; when enabled, adopts Pi's natural end-of-turn threshold compaction for a same-session handoff and resume, with native compaction as the fallback. |
 | `summarizerModel` | Uses the active Pi model with `"inherit"`, or a pinned `"provider/model"`. |
 | `reasoning` | Uses Pi's setting with `"inherit"`, or a model-supported thinking level. Unsupported levels are hidden in settings and clamped through Pi's `thinkingLevelMap`. |
 | `historyMaxTokens` | Optional requested history output-token budget; `null` uses Pi-derived default. The effective provider request is clamped to the summarizer model's positive max-output limit when known. |

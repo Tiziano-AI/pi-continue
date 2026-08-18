@@ -153,6 +153,7 @@ const CONFIG_KEYS = [
 	"agentGuidePath",
 	"agentGuideSyncMode",
 	"midRunGuardEnabled",
+	"adoptNativeCompaction",
 	"appendCompactionMetadata",
 	"appendReadFileTags",
 	"appendModifiedFileTags",
@@ -208,6 +209,7 @@ export async function runSettingsDialog(pi: ExtensionAPI, ctx: ExtensionCommandC
 			`Agent guide path: ${config.agentGuidePath}`,
 			`Agent guide updates: ${config.agentGuideSyncMode} (full replacement only)`,
 			`Automatic mid-run continuation: ${config.midRunGuardEnabled ? "yes" : "no"}`,
+			`Adopt native threshold compaction: ${config.adoptNativeCompaction ? "yes" : "no"}`,
 			`Handoff trigger: ${renderHandoffTrigger(ctx, scope, projectContext.projectRoot)}`,
 			`Append compaction metadata: ${config.appendCompactionMetadata ? "yes" : "no"}`,
 			`Append read file tags: ${config.appendReadFileTags ? "yes" : "no"}`,
@@ -284,6 +286,13 @@ export async function runSettingsDialog(pi: ExtensionAPI, ctx: ExtensionCommandC
 			config = await updateSetting(scope, projectContext.projectRoot, config, async (current) => ({
 				...current,
 				midRunGuardEnabled: !current.midRunGuardEnabled,
+			}));
+			continue;
+		}
+		if (selected.startsWith("Adopt native threshold compaction:")) {
+			config = await updateSetting(scope, projectContext.projectRoot, config, async (current) => ({
+				...current,
+				adoptNativeCompaction: !current.adoptNativeCompaction,
 			}));
 			continue;
 		}

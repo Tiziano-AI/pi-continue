@@ -55,6 +55,7 @@ test("renderStatus reports local runtime wiring and artifact behavior", () => {
 		assert.match(rendered, /- Continuation artifact mode: always/);
 		assert.match(rendered, /- Continuation artifact path: .*\.pi\/continue\/session-test\.md/);
 		assert.match(rendered, /- Agent guide writes: off/);
+		assert.match(rendered, /- Adopt native threshold compaction: no \(synthesis timeout cap 180,000 ms\)/);
 		assert.match(rendered, /Continuation artifacts are Pi-local per-session files/);
 		assert.match(rendered, /full agentGuideUpdate\.content replacements/);
 		assert.match(rendered, /- Append read file tags: no/);
@@ -130,6 +131,27 @@ test("renderStatus summarizes a completed latest continuation calmly", () => {
 		assert.match(rendered, /Saved handoff proof: verified package-owned pi-continue\/v4 compaction/);
 		assert.match(rendered, /Output writes: none performed/);
 		assert.match(rendered, /Action: No action needed/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("renderStatus identifies an adopted natural threshold handoff", () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-continuation-status-"));
+	try {
+		const rendered = renderStatus(
+			baseCtx(),
+			{ ...DEFAULT_CONTINUE_CONFIG, adoptNativeCompaction: true },
+			root,
+			artifactPath(root),
+			join(root, "AGENTS.md"),
+			undefined,
+			baseEvent({ source: "adopted-compaction" }),
+		);
+		assert.match(rendered, /- Source: adopted Pi threshold compaction\./);
+		assert.match(rendered, /- Trigger: Pi natural end-of-turn threshold\./);
+		assert.match(rendered, /- Safe boundary: normal assistant completion immediately before Pi's threshold compaction\./);
+		assert.match(rendered, /- Adopt native threshold compaction: yes/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

@@ -26,6 +26,7 @@ const PROMPT_OVERRIDE_POLICIES = new Set<PromptOverridePolicy>([
 ]);
 const WRITE_MODES = new Set<WriteMode>(["always", "off"]);
 const DEFAULT_SYNTHESIS_TIMEOUT_MS = 180_000;
+export const NATIVE_ADOPTION_SYNTHESIS_TIMEOUT_MS = 180_000;
 const mutationQueues = new Map<string, Promise<void>>();
 
 async function withConfigMutationQueue(path: string, work: () => Promise<void>): Promise<void> {
@@ -49,6 +50,7 @@ export const DEFAULT_CONTINUE_CONFIG: ContinuationConfig = {
 	agentGuidePath: "AGENTS.md",
 	agentGuideSyncMode: "off",
 	midRunGuardEnabled: true,
+	adoptNativeCompaction: false,
 	appendCompactionMetadata: false,
 	appendReadFileTags: false,
 	appendModifiedFileTags: true,
@@ -66,6 +68,7 @@ interface PartialContinuationConfig {
 	agentGuidePath?: string;
 	agentGuideSyncMode?: string;
 	midRunGuardEnabled?: boolean;
+	adoptNativeCompaction?: boolean;
 	appendCompactionMetadata?: boolean;
 	appendReadFileTags?: boolean;
 	appendModifiedFileTags?: boolean;
@@ -83,6 +86,7 @@ export interface ContinuationConfigPatch {
 	agentGuidePath?: string;
 	agentGuideSyncMode?: WriteMode;
 	midRunGuardEnabled?: boolean;
+	adoptNativeCompaction?: boolean;
 	appendCompactionMetadata?: boolean;
 	appendReadFileTags?: boolean;
 	appendModifiedFileTags?: boolean;
@@ -132,6 +136,8 @@ function parsePartialConfig(value: unknown): PartialContinuationConfig {
 	if (agentGuideSyncMode !== undefined) result.agentGuideSyncMode = agentGuideSyncMode;
 	const midRunGuardEnabled = asBoolean(value.midRunGuardEnabled);
 	if (midRunGuardEnabled !== undefined) result.midRunGuardEnabled = midRunGuardEnabled;
+	const adoptNativeCompaction = asBoolean(value.adoptNativeCompaction);
+	if (adoptNativeCompaction !== undefined) result.adoptNativeCompaction = adoptNativeCompaction;
 	const appendCompactionMetadata = asBoolean(value.appendCompactionMetadata);
 	if (appendCompactionMetadata !== undefined) result.appendCompactionMetadata = appendCompactionMetadata;
 	const appendReadFileTags = asBoolean(value.appendReadFileTags);
@@ -203,12 +209,19 @@ function normalizeConfig(partial: PartialContinuationConfig): ContinuationConfig
 		agentGuidePath: normalizePath(partial.agentGuidePath, DEFAULT_CONTINUE_CONFIG.agentGuidePath),
 		agentGuideSyncMode: normalizeWriteMode(partial.agentGuideSyncMode, DEFAULT_CONTINUE_CONFIG.agentGuideSyncMode),
 		midRunGuardEnabled: partial.midRunGuardEnabled ?? DEFAULT_CONTINUE_CONFIG.midRunGuardEnabled,
+		adoptNativeCompaction: partial.adoptNativeCompaction ?? DEFAULT_CONTINUE_CONFIG.adoptNativeCompaction,
 		appendCompactionMetadata: partial.appendCompactionMetadata ?? DEFAULT_CONTINUE_CONFIG.appendCompactionMetadata,
 		appendReadFileTags: partial.appendReadFileTags ?? DEFAULT_CONTINUE_CONFIG.appendReadFileTags,
 		appendModifiedFileTags: partial.appendModifiedFileTags ?? DEFAULT_CONTINUE_CONFIG.appendModifiedFileTags,
 		promptOverridePolicy: normalizePromptOverridePolicy(partial.promptOverridePolicy),
 		showAfterCompact: partial.showAfterCompact ?? DEFAULT_CONTINUE_CONFIG.showAfterCompact,
 	};
+}
+
+/** 将原生采用的尝试限制在固定窗口内，避免阻塞 Pi 自己的摘要器。 */
+export function withNativeAdoptionSynthesisTimeout(config: ContinuationConfig): ContinuationConfig {
+	if (config.synthesisTimeoutMs <= NATIVE_ADOPTION_SYNTHESIS_TIMEOUT_MS) return config;
+	return { ...config, synthesisTimeoutMs: NATIVE_ADOPTION_SYNTHESIS_TIMEOUT_MS };
 }
 
 export function getGlobalConfigPath(): string {

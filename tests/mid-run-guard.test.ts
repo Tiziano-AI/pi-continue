@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
 	decideMidRunGuardTrigger,
+	decideNativeCompactionAdoption,
 	hasNativeCompactionPreparation,
 	shouldEvaluateMidRunContext,
 } from "../extensions/continue/src/mid-run-guard.ts";
@@ -12,10 +13,12 @@ function config(overrides = {}) {
 		summarizerModel: "inherit",
 		reasoning: "inherit",
 		historyMaxTokens: null,
+		synthesisTimeoutMs: 180000,
 		continuationArtifactMode: "always",
 		agentGuidePath: "AGENTS.md",
 		agentGuideSyncMode: "off",
 		midRunGuardEnabled: true,
+		adoptNativeCompaction: false,
 		appendCompactionMetadata: true,
 		appendReadFileTags: false,
 		appendModifiedFileTags: true,
@@ -92,6 +95,59 @@ function nativePreparation(overrides = {}) {
 		...overrides,
 	};
 }
+
+function adoptionInput(overrides = {}) {
+	const piSettings = { enabled: true, reserveTokens: 20, keepRecentTokens: 10 };
+	return {
+		config: config({ adoptNativeCompaction: true }),
+		checkpoint: { stopReason: "stop", openedAt: 1000 },
+		reason: "threshold",
+		willRetry: false,
+		runActive: true,
+		hasPendingMessages: false,
+		contextWindow: 100,
+		preparation: nativePreparation({ messagesToSummarize: [userMessage()] }),
+		branchEntries: [],
+		piSettings,
+		estimateTokens: () => 1000,
+		now: 1001,
+		...overrides,
+	};
+}
+
+test("decideNativeCompactionAdoption accepts one immediate natural threshold compaction", () => {
+	assert.equal(decideNativeCompactionAdoption(adoptionInput()), true);
+});
+
+test("decideNativeCompactionAdoption requires the explicit package opt-in", () => {
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({
+		config: config({ adoptNativeCompaction: false }),
+	})), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({
+		config: config({ enabled: false, adoptNativeCompaction: true }),
+	})), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({
+		piSettings: { enabled: false, reserveTokens: 20, keepRecentTokens: 10 },
+	})), false);
+});
+
+test("decideNativeCompactionAdoption excludes manual, recovery, new-input, and queued-message compactions", () => {
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ reason: "manual" })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ reason: "overflow", willRetry: true })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ willRetry: true })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ runActive: false })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ hasPendingMessages: true })), false);
+});
+
+test("decideNativeCompactionAdoption requires a fresh normal-stop checkpoint and compactable preparation", () => {
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ checkpoint: undefined })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ checkpoint: { stopReason: "toolUse", openedAt: 1000 } })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ now: 31001 })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ now: 999 })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ contextWindow: undefined })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ preparation: false })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ preparation: nativePreparation() })), false);
+});
 
 test("shouldEvaluateMidRunContext only accepts contexts ending in a complete assistant/tool-result batch", () => {
 	assert.equal(shouldEvaluateMidRunContext([{ role: "user" }]), false);

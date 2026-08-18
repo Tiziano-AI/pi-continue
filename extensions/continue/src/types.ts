@@ -22,6 +22,7 @@ export interface ContinuationConfig {
 	agentGuidePath: string;
 	agentGuideSyncMode: WriteMode;
 	midRunGuardEnabled: boolean;
+	adoptNativeCompaction: boolean;
 	appendCompactionMetadata: boolean;
 	appendReadFileTags: boolean;
 	appendModifiedFileTags: boolean;
@@ -80,7 +81,7 @@ export interface ParsedHistoryArtifacts {
 	agentGuideChangeReason: string;
 }
 
-export type ContinuationEventSource = "command-steer" | "command-queue" | "mid-run-guard";
+export type ContinuationEventSource = "command-steer" | "command-queue" | "mid-run-guard" | "adopted-compaction";
 export type ContinuationEventStatus = "running" | "completed" | "failed" | "blocked";
 export type ContinuationArtifactStatus = "pending" | "modeled" | "aborted";
 export type ContinuationPromptStatus = "pending" | "sent" | "not-requested" | "failed";
@@ -190,6 +191,12 @@ export interface ContinuationEventStore {
 	latestEvent: ContinuationLatestEvent | undefined;
 	activeEventId: string | undefined;
 	nextEventSequence: number;
+}
+
+/** 证明原生阈值压缩紧随一次正常助手结束的一回合凭据。 */
+export interface NativeCompactionAdoptionCheckpoint {
+	stopReason: string;
+	openedAt: number;
 }
 
 /** Persisted status for whether a compaction attempted a configured agent-guide replacement. */

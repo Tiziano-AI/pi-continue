@@ -11,6 +11,7 @@ import type {
 	ContextUsageEstimateSnapshot,
 	ContinuationConfig,
 	MidRunGuardTrigger,
+	NativeCompactionAdoptionCheckpoint,
 	PiCompactionSettings,
 } from "./types.ts";
 
@@ -19,6 +20,21 @@ export interface MidRunGuardDecisionInput {
 	piSettings: PiCompactionSettings;
 	contextWindow: number | undefined;
 	estimate: ContextUsageEstimateSnapshot;
+}
+
+export interface NativeCompactionAdoptionDecisionInput {
+	config: ContinuationConfig;
+	checkpoint: NativeCompactionAdoptionCheckpoint | undefined;
+	reason: string | undefined;
+	willRetry: boolean | undefined;
+	runActive: boolean;
+	hasPendingMessages: boolean;
+	contextWindow: number | undefined;
+	preparation: unknown | undefined;
+	branchEntries: unknown[];
+	piSettings: PiCompactionSettings;
+	estimateTokens: (message: unknown) => number;
+	now?: number;
 }
 
 interface BranchEntryRecord {
@@ -141,6 +157,25 @@ export function hasNativeCompactionPreparation(
 	if (estimateBranchTokens(branchEntries, estimateTokens) <= piSettings.keepRecentTokens) return false;
 	const normalized = normalizeCompactionPreparation(preparation, branchEntries);
 	return normalized.messagesToSummarize.length > 0 || normalized.turnPrefixMessages.length > 0;
+}
+
+const NATIVE_ADOPTION_CHECKPOINT_TTL_MS = 30_000;
+
+/** 只接受紧随正常回合结束的 Pi 阈值压缩，排除手动与恢复压缩。 */
+export function decideNativeCompactionAdoption(input: NativeCompactionAdoptionDecisionInput): boolean {
+	if (!input.config.enabled || !input.config.adoptNativeCompaction || !input.piSettings.enabled) return false;
+	if (!input.checkpoint || input.checkpoint.stopReason !== "stop") return false;
+	if (input.reason !== "threshold" || input.willRetry !== false) return false;
+	if (!input.runActive || input.hasPendingMessages) return false;
+	if (!hasUsableContextWindow(input.contextWindow, input.piSettings.reserveTokens)) return false;
+	const checkpointAge = (input.now ?? Date.now()) - input.checkpoint.openedAt;
+	if (checkpointAge < 0 || checkpointAge > NATIVE_ADOPTION_CHECKPOINT_TTL_MS) return false;
+	return hasNativeCompactionPreparation(
+		input.preparation,
+		input.branchEntries,
+		input.piSettings,
+		input.estimateTokens,
+	);
 }
 
 /** Decide whether a pre-provider context belongs to a completed assistant/tool-result loop. */

@@ -154,6 +154,9 @@ function createCommandContext(cwd, custom) {
 		isIdle() {
 			return true;
 		},
+		hasPendingMessages() {
+			return false;
+		},
 		abort() {},
 		compact(options) {
 			compactCount += 1;
@@ -186,6 +189,16 @@ function writeArtifactOffConfig(cwd) {
 	mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
 	writeFileSync(join(cwd, ".pi", "extensions", "pi-continue.json"), JSON.stringify({
 		continuationArtifactMode: "off",
+	}), "utf8");
+}
+
+function writeNativeAdoptionConfig(cwd, overrides = {}) {
+	mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
+	writeFileSync(join(cwd, ".pi", "extensions", "pi-continue.json"), JSON.stringify({
+		adoptNativeCompaction: true,
+		continuationArtifactMode: "off",
+		showAfterCompact: false,
+		...overrides,
 	}), "utf8");
 }
 
@@ -229,7 +242,7 @@ function compactableToolBranch() {
 	];
 }
 
-function compactionEvent(preparation = {}, branchEntries = []) {
+function compactionEvent(preparation = {}, branchEntries = [], overrides = {}) {
 	return {
 		preparation: {
 			firstKeptEntryId: "kept-entry",
@@ -244,7 +257,10 @@ function compactionEvent(preparation = {}, branchEntries = []) {
 		},
 		branchEntries,
 		customInstructions: undefined,
+		reason: "manual",
+		willRetry: false,
 		signal: new AbortController().signal,
+		...overrides,
 	};
 }
 
@@ -827,6 +843,84 @@ test("session_compact ledger display is transient UI and sends only the same-ses
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.equal(customCalls, 1);
 	assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
+});
+
+test("native threshold adoption synthesizes one owned handoff and dispatches one resume", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-native-adoption-"));
+	const faux = registerFauxProvider();
+	try {
+		writeNativeAdoptionConfig(cwd);
+		faux.setResponses([fauxAssistantMessage(continuationArtifactJson())]);
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = faux.models[0];
+		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
+		ctx.isIdle = () => false;
+		let abortCount = 0;
+		ctx.abort = () => {
+			abortCount += 1;
+		};
+		registerContinueExtension(pi);
+		await pi.events.get("message_end")({ message: assistantMessage("stop") }, ctx);
+		const thresholdEvent = compactionEvent({}, [], { reason: "threshold", willRetry: false });
+		const result = await pi.events.get("session_before_compact")(thresholdEvent, ctx);
+		assert.ok(result?.compaction);
+		assert.equal(result.compaction.details.continuationEventId, "continue-1");
+		assert.equal(ctx.compactCount, 0);
+		assert.equal(abortCount, 0);
+		const duplicate = await pi.events.get("session_before_compact")(thresholdEvent, ctx);
+		assert.deepEqual(duplicate, { cancel: true });
+		const savedEvent = {
+			fromExtension: true,
+			compactionEntry: {
+				id: "compact-adopted",
+				summary: result.compaction.summary,
+				details: result.compaction.details,
+			},
+		};
+		await pi.events.get("session_compact")(savedEvent, ctx);
+		await pi.events.get("session_compact")(savedEvent, ctx);
+		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
+		assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
+		await pi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, ctx);
+		await pi.events.get("message_end")({ message: assistantMessage("stop") }, ctx);
+	} finally {
+		faux.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("failed native threshold adoption releases ownership to Pi native compaction", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-native-fallback-"));
+	const faux = registerFauxProvider();
+	try {
+		writeNativeAdoptionConfig(cwd, { synthesisTimeoutMs: 600000 });
+		faux.setResponses([fauxAssistantMessage("not json")]);
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = faux.models[0];
+		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
+		ctx.isIdle = () => false;
+		registerContinueExtension(pi);
+		await pi.events.get("message_end")({ message: assistantMessage("stop") }, ctx);
+		const result = await pi.events.get("session_before_compact")(
+			compactionEvent({}, [], { reason: "threshold", willRetry: false }),
+			ctx,
+		);
+		assert.equal(result, undefined);
+		assert.equal(ctx.compactCount, 0);
+		assertNoFailedSynthesisSideEffects(cwd, pi);
+		await pi.events.get("session_compact")({
+			fromExtension: false,
+			compactionEntry: { id: "compact-native", summary: "native", details: undefined },
+		}, ctx);
+		assert.deepEqual(pi.sent, []);
+		await pi.commands.get("continue").handler("steer", ctx);
+		assert.equal(ctx.compactCount, 1);
+	} finally {
+		faux.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
 });
 
 test("session_before_compact and session_compact write default artifact and configured agent guide only after a successful compaction", async () => {

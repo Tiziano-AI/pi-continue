@@ -56,6 +56,7 @@ function formatTimestamp(value: number | undefined): string {
 }
 
 function sourceLabel(event: ContinuationLatestEvent): string {
+	if (event.source === "adopted-compaction") return "adopted Pi threshold compaction";
 	if (event.source === "mid-run-guard") return "automatic continuation";
 	if (event.source === "command-queue") return "queued /continue";
 	return "/continue steer";
@@ -94,6 +95,7 @@ function statusLabel(event: ContinuationLatestEvent): string {
 }
 
 function renderTrigger(event: ContinuationLatestEvent): string {
+	if (event.source === "adopted-compaction") return "Pi natural end-of-turn threshold";
 	if (!event.trigger) return "manual request";
 	return [
 		`${event.trigger.estimatedTokens.toLocaleString()}/${event.trigger.contextWindow.toLocaleString()} estimated tokens`,
@@ -103,6 +105,7 @@ function renderTrigger(event: ContinuationLatestEvent): string {
 }
 
 function renderSafeBoundary(event: ContinuationLatestEvent): string {
+	if (event.source === "adopted-compaction") return "normal assistant completion immediately before Pi's threshold compaction";
 	if (event.source === "mid-run-guard") return "completed assistant/tool-result batch before the next model request";
 	if (event.source === "command-queue") return "waited until Pi was idle before saving the handoff";
 	return "requested by user; the current assistant turn stops first when needed";
@@ -274,7 +277,8 @@ export function renderStatus(
 		`- Agent guide updates: ${config.agentGuideSyncMode}`,
 		`- Agent guide writes: ${config.agentGuideSyncMode === "always" ? "full replacement only" : "off"}`,
 		`- Automatic mid-run continuation: ${config.midRunGuardEnabled ? "yes" : "no"}`,
-		`- Append compaction metadata: ${config.appendCompactionMetadata ? "yes" : "no"}`,
+		`- Adopt native threshold compaction: ${config.adoptNativeCompaction ? "yes" : "no"} (synthesis timeout cap 180,000 ms)`,
+		`- Append compaction metadata: ${config.appendCompactionMetadata ? "yes" : "no"}`,,
 		`- Append read file tags: ${config.appendReadFileTags ? "yes" : "no"}`,
 		`- Append modified file tags: ${config.appendModifiedFileTags ? "yes" : "no"}`,
 		`- Prompt override policy: ${config.promptOverridePolicy}`,

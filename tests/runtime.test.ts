@@ -5,12 +5,16 @@ import {
 	CONTINUATION_PROMPT,
 	acceptContinuationCompactionProof,
 	armDeferredResumeStartTimeout,
+	consumeNativeCompactionAdoptionCheckpoint,
 	createContinuationRuntimeState,
 	failRunningAwaitingContinuationResume,
 	markAwaitingContinuationResumeStarted,
 	parseContinuationRequest,
+	recordNativeCompactionAdoptionCheckpoint,
+	releaseAdoptedNativeCompaction,
 	runContinuationCommand,
 	settleAwaitingContinuationResumeFromAssistant,
+	startAdoptedNativeCompaction,
 	startContinuationCompaction,
 } from "../extensions/continue/src/runtime.ts";
 
@@ -91,6 +95,42 @@ test("parseContinuationRequest defaults to steer and preserves instructions", ()
 	assert.deepEqual(parseContinuationRequest("queue preserve state"), { mode: "queue", instructions: "preserve state" });
 	assert.deepEqual(parseContinuationRequest("steer focus auth"), { mode: "steer", instructions: "focus auth" });
 	assert.deepEqual(parseContinuationRequest("now focus auth"), { mode: "steer", instructions: "now focus auth" });
+});
+
+test("native adoption checkpoint is normal-stop-only and one-shot", () => {
+	const runtime = createContinuationRuntimeState();
+	recordNativeCompactionAdoptionCheckpoint(runtime, "toolUse");
+	assert.equal(runtime.nativeCompactionAdoptionCheckpoint, undefined);
+	recordNativeCompactionAdoptionCheckpoint(runtime, "stop");
+	const checkpoint = consumeNativeCompactionAdoptionCheckpoint(runtime);
+	assert.equal(checkpoint?.stopReason, "stop");
+	assert.equal(runtime.nativeCompactionAdoptionCheckpoint, undefined);
+	assert.equal(consumeNativeCompactionAdoptionCheckpoint(runtime), undefined);
+});
+
+test("adopted native compaction owns lifecycle without invoking compact or abort", () => {
+	const owner = createContext(false);
+	const ctx = bindContext(owner);
+	const runtime = createContinuationRuntimeState();
+	const failedEvents = [];
+	const eventId = startAdoptedNativeCompaction(ctx, runtime, {
+		sendContinuation() {},
+		onContinuationFailed: (failedEventId) => failedEvents.push(failedEventId),
+	});
+	assert.equal(eventId, "continue-1");
+	assert.equal(owner.aborts, 0);
+	assert.equal(owner.compactOptions, undefined);
+	assert.equal(runtime.latestEvent?.source, "adopted-compaction");
+	assert.equal(runtime.latestEvent?.status, "running");
+	assert.equal(runtime.pendingResumeDispatch?.eventId, "continue-1");
+	assert.equal(releaseAdoptedNativeCompaction(ctx, runtime, eventId, "fallback", (failedEventId) => {
+		failedEvents.push(failedEventId);
+	}), true);
+	assert.deepEqual(failedEvents, ["continue-1"]);
+	assert.equal(runtime.activeEventId, undefined);
+	assert.equal(runtime.pendingResumeDispatch, undefined);
+	assert.equal(runtime.latestEvent?.status, "failed");
+	assert.equal(runtime.latestEvent?.failureReason, "fallback");
 });
 
 test("stale assistant message_end cannot settle resume before start proof", () => {
