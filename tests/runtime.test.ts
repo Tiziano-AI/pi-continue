@@ -215,7 +215,7 @@ test("mid-run guard can chain after a resumed assistant tool-use turn", () => {
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(guard, true);
-	assert.equal(owner.aborts, 1);
+	assert.equal(owner.aborts, 0);
 	assert.equal(runtime.latestEvent?.id, "continue-2");
 	assert.equal(runtime.latestEvent?.status, "running");
 	assert.equal(runtime.latestEvent?.resume.status, "not-requested");
@@ -486,7 +486,7 @@ test("failed guard records a failure key and blocks identical retries", () => {
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(retry, false);
-	assert.equal(owner.aborts, 2);
+	assert.equal(owner.aborts, 1);
 	assert.equal(runtime.latestEvent?.status, "blocked");
 	assert.equal(runtime.latestEvent?.failureReason, "Repeated over-limit retry was blocked after a failed continuation.");
 });

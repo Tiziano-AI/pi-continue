@@ -357,7 +357,7 @@ test("mid-run guard dispatches resume as follow-up after context threshold proof
 			messages: [userMessage("run tool"), highUsageAssistantMessage(), toolResultMessage("x".repeat(160))],
 		}, ctx);
 		assert.equal(ctx.compactCount, 1);
-		assert.equal(abortCount, 1);
+		assert.equal(abortCount, 0);
 		ctx.compactOptions.onComplete({});
 		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
 		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
@@ -404,7 +404,7 @@ test("mid-run guard skips cleanly when Pi has no compactable session preparation
 		}), "utf8");
 		await pi.events.get("context")(event, ctx);
 		assert.equal(ctx.compactCount, 1);
-		assert.equal(abortCount, 1);
+		assert.equal(abortCount, 0);
 		assert.equal(notifications.length, 2);
 		assert.match(notifications[1][0], /^automatic continuation: saving handoff/);
 		assert.equal(notifications[1][1], "info");
@@ -449,7 +449,7 @@ test("mid-run guard chains when the resumed assistant tool loop fills context ag
 			messages: [userMessage("continue tools"), highUsageAssistantMessage(), toolResultMessage("x".repeat(160))],
 		}, ctx);
 		assert.equal(ctx.compactCount, 2);
-		assert.equal(abortCount, 1);
+		assert.equal(abortCount, 0);
 		assert.equal(ctx.workingMessages.at(-1), "pi-continue saving handoff");
 		assert.deepEqual(notifications, [
 			["/continue steer: saving handoff.", "info"],

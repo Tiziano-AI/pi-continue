@@ -235,7 +235,6 @@ export function startContinuationCompaction(
 		options.continueAfterComplete ? "pending" : "not-requested",
 	);
 	beginWorkingVisuals(ctx, runtime, event.id, "pi-continue saving handoff");
-	if (options.abortActiveRun) ctx.abort();
 	const label = sourceLabel(options.source);
 	const triggerText = options.trigger ? ` (${describeGuardTrigger(options.trigger)})` : "";
 	notify(ctx, `${label}: saving handoff${triggerText}.`, "info");

@@ -65,7 +65,7 @@ test("startContinuationCompaction sends resume only after owned compaction proof
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(started, true);
-	assert.equal(owner.aborts, 1);
+	assert.equal(owner.aborts, 0);
 	assert.equal(runtime.compactionRunning, true);
 	assert.equal(runtime.latestEvent?.source, "command-steer");
 	assert.equal(runtime.latestEvent?.status, "running");
@@ -96,6 +96,30 @@ test("startContinuationCompaction sends resume only after owned compaction proof
 	assert.equal(runtime.latestEvent?.status, "completed");
 	assert.equal(runtime.latestEvent?.resume.status, "completed");
 	assert.equal(runtime.activeEventId, undefined);
+});
+
+test("continuation leaves active-run cancellation to ctx.compact", () => {
+	const owner = createContext(false);
+	const ctx = bindContext(owner);
+	const compact = ctx.compact;
+	ctx.compact = (options) => {
+		owner.aborts += 1;
+		compact.call(ctx, options);
+	};
+	const runtime = createContinuationRuntimeState();
+
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "mid-run-guard",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: true,
+		continueAfterComplete: true,
+		sendContinuation: () => {},
+	});
+
+	assert.equal(started, true);
+	assert.equal(owner.aborts, 1);
+	assert.equal(runtime.compactionRunning, true);
 });
 
 test("synchronous resume start proof survives verified dispatch ordering", () => {
