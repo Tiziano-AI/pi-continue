@@ -55,6 +55,7 @@ function bindContext(owner) {
 }
 
 const trigger = {
+	mode: "reserve-tokens",
 	estimatedTokens: 120,
 	thresholdTokens: 100,
 	contextWindow: 128,

@@ -181,6 +181,7 @@ function createCommandContext(cwd, custom) {
 function writeAgentGuideSyncConfig(cwd) {
 	mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
 	writeFileSync(join(cwd, ".pi", "extensions", "pi-continue.json"), JSON.stringify({
+		continuationArtifactMode: "always",
 		agentGuideSyncMode: "always",
 	}), "utf8");
 }
@@ -189,6 +190,17 @@ function writeArtifactOffConfig(cwd) {
 	mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
 	writeFileSync(join(cwd, ".pi", "extensions", "pi-continue.json"), JSON.stringify({
 		continuationArtifactMode: "off",
+	}), "utf8");
+}
+
+function writePercentageConfig(cwd, percentage = 90, overrides = {}) {
+	mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
+	writeFileSync(join(cwd, ".pi", "extensions", "pi-continue.json"), JSON.stringify({
+		compactionThresholdMode: "percentage",
+		compactionThresholdPercent: percentage,
+		continuationArtifactMode: "off",
+		showAfterCompact: false,
+		...overrides,
 	}), "utf8");
 }
 
@@ -583,6 +595,60 @@ test("settings dialog can edit the human handoff trigger", async () => {
 	}
 });
 
+test("settings dialog stores percentage thresholds without rewriting Pi reserve tokens", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-percentage-settings-"));
+	try {
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		const notifications = [];
+		let settingsSelectCount = 0;
+		ctx.ui.notify = (message, type) => {
+			notifications.push([message, type]);
+		};
+		ctx.ui.select = async (title, options) => {
+			if (title === "Continuation settings") {
+				settingsSelectCount += 1;
+				if (settingsSelectCount === 1) {
+					const modeOption = options.find((option) => option.startsWith("Compaction threshold mode:"));
+					assert.equal(modeOption, "Compaction threshold mode: Fixed reserve tokens");
+					return modeOption;
+				}
+				if (settingsSelectCount === 2) {
+					const triggerOption = options.find((option) => option.startsWith("Handoff trigger:"));
+					assert.equal(triggerOption, "Handoff trigger: 90% (115,200 tokens for this model)");
+					return triggerOption;
+				}
+				return "Done";
+			}
+			if (title === "Compaction threshold mode") {
+				assert.deepEqual(options, ["Fixed reserve tokens", "Percentage of current model"]);
+				return "Percentage of current model";
+			}
+			if (title === "Handoff trigger") {
+				assert.deepEqual(options, ["Keep current (90%)", "Set context percentage"]);
+				return "Set context percentage";
+			}
+			return undefined;
+		};
+		ctx.ui.input = async (title, placeholder) => {
+			assert.equal(title, "Handoff trigger");
+			assert.equal(placeholder, "percentage above 0 and below 100, for example 90");
+			return "92.5%";
+		};
+		registerContinueExtension(pi);
+		await pi.commands.get("continue").handler("settings project", ctx);
+		const config = JSON.parse(readFileSync(join(cwd, ".pi", "extensions", "pi-continue.json"), "utf8"));
+		assert.deepEqual(config, {
+			compactionThresholdMode: "percentage",
+			compactionThresholdPercent: 92.5,
+		});
+		assert.equal(existsSync(join(cwd, ".pi", "settings.json")), false);
+		assert.deepEqual(notifications, [["Updated project handoff trigger", "info"]]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("agent_end settles only a started continuation resume failure", async () => {
 	const cwd = process.cwd();
 	const pi = createFakePi(cwd);
@@ -843,6 +909,82 @@ test("session_compact ledger display is transient UI and sends only the same-ses
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.equal(customCalls, 1);
 	assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
+});
+
+test("percentage threshold starts one owned compaction when it is earlier than Pi native threshold", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-percentage-early-"));
+	try {
+		writePercentageConfig(cwd);
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 5, keepRecentTokens: 10 },
+		}), "utf8");
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...ctx.model, contextWindow: 100 };
+		ctx.getContextUsage = () => ({ tokens: 90, percent: 90, contextWindow: 100 });
+		ctx.setBranch(compactableToolBranch());
+		registerContinueExtension(pi);
+		await pi.events.get("turn_end")({ message: assistantMessage("stop"), toolResults: [] }, ctx);
+		await pi.events.get("turn_end")({ message: assistantMessage("stop"), toolResults: [] }, ctx);
+		assert.equal(ctx.compactCount, 1);
+		assert.match(ctx.compactOptions.customInstructions, /Compaction threshold: 90% \(90 of 100 tokens\)\./);
+		ctx.compactOptions.onError(new Error("test settlement"));
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("percentage threshold exact match starts at an equal Pi token boundary", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-percentage-equal-"));
+	try {
+		writePercentageConfig(cwd);
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 10, keepRecentTokens: 10 },
+		}), "utf8");
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...ctx.model, contextWindow: 100 };
+		ctx.getContextUsage = () => ({ tokens: 90, percent: 90, contextWindow: 100 });
+		ctx.setBranch(compactableToolBranch());
+		registerContinueExtension(pi);
+		await pi.events.get("turn_end")({ message: assistantMessage("stop"), toolResults: [] }, ctx);
+		assert.equal(ctx.compactCount, 1);
+		ctx.compactOptions.onError(new Error("test settlement"));
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("percentage threshold defers only early native threshold compaction and fails open on unknown usage", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-percentage-late-"));
+	try {
+		writePercentageConfig(cwd);
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
+		}), "utf8");
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...ctx.model, contextWindow: 100 };
+		ctx.getContextUsage = () => ({ tokens: 85, percent: 85, contextWindow: 100 });
+		registerContinueExtension(pi);
+		await pi.events.get("turn_end")({ message: assistantMessage("stop"), toolResults: [] }, ctx);
+		assert.equal(ctx.compactCount, 0);
+		const thresholdEvent = compactionEvent({}, [], { reason: "threshold", willRetry: false });
+		assert.deepEqual(await pi.events.get("session_before_compact")(thresholdEvent, ctx), { cancel: true });
+		assert.equal(await pi.events.get("session_before_compact")(compactionEvent({}, [], { reason: "manual" }), ctx), undefined);
+		assert.equal(await pi.events.get("session_before_compact")(compactionEvent({}, [], { reason: "overflow", willRetry: true }), ctx), undefined);
+		ctx.getContextUsage = () => ({ tokens: null, percent: null, contextWindow: 100 });
+		await pi.events.get("turn_end")({ message: assistantMessage("stop"), toolResults: [] }, ctx);
+		assert.equal(ctx.compactCount, 0);
+		assert.equal(await pi.events.get("session_before_compact")(thresholdEvent, ctx), undefined);
+		ctx.getContextUsage = () => ({ tokens: 90, percent: 90, contextWindow: 100 });
+		assert.equal(await pi.events.get("session_before_compact")(thresholdEvent, ctx), undefined);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
 });
 
 test("native threshold adoption synthesizes one owned handoff and dispatches one resume", async () => {

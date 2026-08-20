@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
+	CompactionThresholdMode,
 	ConfigScope,
 	ContinuationConfig,
 	ContinuationReasoning,
@@ -25,6 +26,7 @@ const PROMPT_OVERRIDE_POLICIES = new Set<PromptOverridePolicy>([
 	"project-override",
 ]);
 const WRITE_MODES = new Set<WriteMode>(["always", "off"]);
+const COMPACTION_THRESHOLD_MODES = new Set<CompactionThresholdMode>(["reserve-tokens", "percentage"]);
 const DEFAULT_SYNTHESIS_TIMEOUT_MS = 180_000;
 export const NATIVE_ADOPTION_SYNTHESIS_TIMEOUT_MS = 180_000;
 const mutationQueues = new Map<string, Promise<void>>();
@@ -51,6 +53,8 @@ export const DEFAULT_CONTINUE_CONFIG: ContinuationConfig = {
 	agentGuideSyncMode: "off",
 	midRunGuardEnabled: true,
 	adoptNativeCompaction: false,
+	compactionThresholdMode: "reserve-tokens",
+	compactionThresholdPercent: 90,
 	appendCompactionMetadata: false,
 	appendReadFileTags: false,
 	appendModifiedFileTags: true,
@@ -69,6 +73,8 @@ interface PartialContinuationConfig {
 	agentGuideSyncMode?: string;
 	midRunGuardEnabled?: boolean;
 	adoptNativeCompaction?: boolean;
+	compactionThresholdMode?: string;
+	compactionThresholdPercent?: number;
 	appendCompactionMetadata?: boolean;
 	appendReadFileTags?: boolean;
 	appendModifiedFileTags?: boolean;
@@ -87,6 +93,8 @@ export interface ContinuationConfigPatch {
 	agentGuideSyncMode?: WriteMode;
 	midRunGuardEnabled?: boolean;
 	adoptNativeCompaction?: boolean;
+	compactionThresholdMode?: CompactionThresholdMode;
+	compactionThresholdPercent?: number;
 	appendCompactionMetadata?: boolean;
 	appendReadFileTags?: boolean;
 	appendModifiedFileTags?: boolean;
@@ -138,6 +146,10 @@ function parsePartialConfig(value: unknown): PartialContinuationConfig {
 	if (midRunGuardEnabled !== undefined) result.midRunGuardEnabled = midRunGuardEnabled;
 	const adoptNativeCompaction = asBoolean(value.adoptNativeCompaction);
 	if (adoptNativeCompaction !== undefined) result.adoptNativeCompaction = adoptNativeCompaction;
+	const compactionThresholdMode = asString(value.compactionThresholdMode);
+	if (compactionThresholdMode !== undefined) result.compactionThresholdMode = compactionThresholdMode;
+	const compactionThresholdPercent = asNumber(value.compactionThresholdPercent);
+	if (compactionThresholdPercent !== undefined) result.compactionThresholdPercent = compactionThresholdPercent;
 	const appendCompactionMetadata = asBoolean(value.appendCompactionMetadata);
 	if (appendCompactionMetadata !== undefined) result.appendCompactionMetadata = appendCompactionMetadata;
 	const appendReadFileTags = asBoolean(value.appendReadFileTags);
@@ -182,6 +194,18 @@ function normalizeWriteMode(value: string | undefined, fallback: WriteMode): Wri
 		: fallback;
 }
 
+function normalizeCompactionThresholdMode(value: string | undefined): CompactionThresholdMode {
+	return value !== undefined && COMPACTION_THRESHOLD_MODES.has(value as CompactionThresholdMode)
+		? (value as CompactionThresholdMode)
+		: DEFAULT_CONTINUE_CONFIG.compactionThresholdMode;
+}
+
+function normalizeCompactionThresholdPercent(value: number | undefined): number {
+	return value !== undefined && value > 0 && value < 100
+		? value
+		: DEFAULT_CONTINUE_CONFIG.compactionThresholdPercent;
+}
+
 function normalizePath(value: string | undefined, fallback: string): string {
 	const trimmed = value?.trim();
 	return trimmed && trimmed.length > 0 ? trimmed : fallback;
@@ -210,6 +234,8 @@ function normalizeConfig(partial: PartialContinuationConfig): ContinuationConfig
 		agentGuideSyncMode: normalizeWriteMode(partial.agentGuideSyncMode, DEFAULT_CONTINUE_CONFIG.agentGuideSyncMode),
 		midRunGuardEnabled: partial.midRunGuardEnabled ?? DEFAULT_CONTINUE_CONFIG.midRunGuardEnabled,
 		adoptNativeCompaction: partial.adoptNativeCompaction ?? DEFAULT_CONTINUE_CONFIG.adoptNativeCompaction,
+		compactionThresholdMode: normalizeCompactionThresholdMode(partial.compactionThresholdMode),
+		compactionThresholdPercent: normalizeCompactionThresholdPercent(partial.compactionThresholdPercent),
 		appendCompactionMetadata: partial.appendCompactionMetadata ?? DEFAULT_CONTINUE_CONFIG.appendCompactionMetadata,
 		appendReadFileTags: partial.appendReadFileTags ?? DEFAULT_CONTINUE_CONFIG.appendReadFileTags,
 		appendModifiedFileTags: partial.appendModifiedFileTags ?? DEFAULT_CONTINUE_CONFIG.appendModifiedFileTags,

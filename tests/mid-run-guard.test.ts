@@ -19,6 +19,8 @@ function config(overrides = {}) {
 		agentGuideSyncMode: "off",
 		midRunGuardEnabled: true,
 		adoptNativeCompaction: false,
+		compactionThresholdMode: "reserve-tokens",
+		compactionThresholdPercent: 90,
 		appendCompactionMetadata: true,
 		appendReadFileTags: false,
 		appendModifiedFileTags: true,
@@ -173,6 +175,7 @@ test("decideMidRunGuardTrigger ignores disabled branches", () => {
 test("decideMidRunGuardTrigger only trips above the reserve threshold", () => {
 	assert.equal(decideMidRunGuardTrigger(input({ estimate: { tokens: 80, usageTokens: 70, trailingTokens: 10, lastUsageIndex: 3 } })), undefined);
 	assert.deepEqual(decideMidRunGuardTrigger(input()), {
+		mode: "reserve-tokens",
 		estimatedTokens: 81,
 		thresholdTokens: 80,
 		contextWindow: 100,
@@ -181,6 +184,42 @@ test("decideMidRunGuardTrigger only trips above the reserve threshold", () => {
 		trailingTokens: 11,
 		lastUsageIndex: 3,
 	});
+});
+
+test("decideMidRunGuardTrigger recomputes percentage thresholds for the current model", () => {
+	const percentageConfig = config({
+		compactionThresholdMode: "percentage",
+		compactionThresholdPercent: 90,
+	});
+	assert.equal(decideMidRunGuardTrigger(input({
+		config: percentageConfig,
+		contextWindow: 100,
+		estimate: { tokens: 89, usageTokens: 89, trailingTokens: 0, lastUsageIndex: 3 },
+	})), undefined);
+	assert.deepEqual(decideMidRunGuardTrigger(input({
+		config: percentageConfig,
+		contextWindow: 1000,
+		estimate: { tokens: 900, usageTokens: 900, trailingTokens: 0, lastUsageIndex: 4 },
+	})), {
+		mode: "percentage",
+		percentage: 90,
+		thresholdTokens: 900,
+		contextWindow: 1000,
+		estimatedTokens: 900,
+		usageTokens: 900,
+		trailingTokens: 0,
+		lastUsageIndex: 4,
+	});
+	assert.equal(decideMidRunGuardTrigger(input({
+		config: percentageConfig,
+		contextWindow: 258000,
+		estimate: { tokens: 232200, usageTokens: 232200, trailingTokens: 0, lastUsageIndex: 5 },
+	}))?.thresholdTokens, 232200);
+	assert.equal(decideMidRunGuardTrigger(input({
+		config: percentageConfig,
+		contextWindow: 1000000,
+		estimate: { tokens: 900000, usageTokens: 900000, trailingTokens: 0, lastUsageIndex: 6 },
+	}))?.thresholdTokens, 900000);
 });
 
 test("hasNativeCompactionPreparation rejects Pi's false no-preparation sentinel", () => {

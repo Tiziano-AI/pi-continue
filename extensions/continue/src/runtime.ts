@@ -9,6 +9,7 @@ import {
 	recordBlockedContinuationEvent,
 	settleContinuationResume,
 } from "./continuation-event.ts";
+import { describeCompactionThreshold } from "./threshold.ts";
 import type {
 	ContinuationEventSource,
 	ContinuationLatestEvent,
@@ -162,8 +163,9 @@ export function describeGuardTrigger(trigger: MidRunGuardTrigger): string {
 
 export function buildGuardFailureKey(trigger: MidRunGuardTrigger): string {
 	return [
+		trigger.mode,
 		trigger.contextWindow,
-		trigger.reserveTokens,
+		trigger.mode === "reserve-tokens" ? trigger.reserveTokens : trigger.percentage,
 		trigger.thresholdTokens,
 		trigger.estimatedTokens,
 		trigger.usageTokens,
@@ -176,7 +178,7 @@ export function buildGuardInstructions(trigger: MidRunGuardTrigger): string {
 	return [
 		"Automatic mid-run continuation triggered after a completed assistant/tool-result batch, before Pi sent another model request.",
 		`Estimated context: ${trigger.estimatedTokens} tokens.`,
-		`Compaction threshold: ${trigger.thresholdTokens} tokens (${trigger.contextWindow} context window - ${trigger.reserveTokens} reserve).`,
+		`Compaction threshold: ${describeCompactionThreshold(trigger)}.`,
 		"Prioritize current state, latest tool results, remaining task intent, file changes, blockers, and exact next steps.",
 	].join("\n");
 }

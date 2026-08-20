@@ -11,6 +11,7 @@ export type PromptOverridePolicy = "package-default" | "global-override" | "proj
 export type WriteMode = "always" | "off";
 export type ConfigScope = "global" | "project";
 export type HistoryScenario = "initial" | "update";
+export type CompactionThresholdMode = "reserve-tokens" | "percentage";
 
 export interface ContinuationConfig {
 	enabled: boolean;
@@ -23,6 +24,8 @@ export interface ContinuationConfig {
 	agentGuideSyncMode: WriteMode;
 	midRunGuardEnabled: boolean;
 	adoptNativeCompaction: boolean;
+	compactionThresholdMode: CompactionThresholdMode;
+	compactionThresholdPercent: number;
 	appendCompactionMetadata: boolean;
 	appendReadFileTags: boolean;
 	appendModifiedFileTags: boolean;
@@ -251,12 +254,25 @@ export interface ContextUsageEstimateSnapshot {
 	lastUsageIndex: number | null;
 }
 
-export interface MidRunGuardTrigger {
-	estimatedTokens: number;
+export interface ReserveTokenThreshold {
+	mode: "reserve-tokens";
 	thresholdTokens: number;
 	contextWindow: number;
 	reserveTokens: number;
+}
+
+export interface PercentageThreshold {
+	mode: "percentage";
+	thresholdTokens: number;
+	contextWindow: number;
+	percentage: number;
+}
+
+export type ResolvedCompactionThreshold = ReserveTokenThreshold | PercentageThreshold;
+
+export type MidRunGuardTrigger = ResolvedCompactionThreshold & {
+	estimatedTokens: number;
 	usageTokens: number;
 	trailingTokens: number;
 	lastUsageIndex: number | null;
-}
+};

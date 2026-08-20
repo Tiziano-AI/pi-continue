@@ -34,7 +34,7 @@ Requires Pi `0.74.0` or newer, where model-specific thinking support is describe
 
 ## Use `/continue`
 
-Package-side automatic continuation is enabled by default. The trigger still follows Pi's compaction threshold. You can also use `/continue` directly.
+Package-side automatic continuation is enabled by default. The backward-compatible trigger mode follows Pi's fixed reserve-token threshold; you can instead select a percentage of each session's current model context window. You can also use `/continue` directly.
 
 Running only `/continue` opens a small action palette when UI is available. In non-interactive modes, `/continue` runs the direct continuation path instead of waiting for a UI.
 
@@ -62,7 +62,7 @@ The automatic mid-turn guard is the main reason to use this package. It acts dur
 It:
 
 - waits for a completed assistant/tool-result batch with matching tool-call IDs
-- checks Pi's own compaction threshold
+- checks the selected compaction threshold policy
 - stops before the next oversized provider request is sent
 - runs native Pi compaction
 - runs the customizable handoff prompt
@@ -70,13 +70,21 @@ It:
 - verifies Pi saved a package-owned `pi-continue/v4` compaction entry
 - sends the same-session resume prompt only after that proof
 
-The threshold belongs to Pi, not this package:
+The default `reserve-tokens` mode follows Pi's threshold exactly:
 
 ```text
 estimated context tokens > model.contextWindow - compaction.reserveTokens
 ```
 
-Configure the threshold directly in Pi settings, or choose `Handoff trigger` in `/continue settings [project|global]`. Pi's default compaction settings are:
+The optional `percentage` mode resolves independently for every session and current model:
+
+```text
+estimated context tokens >= floor(model.contextWindow * compactionThresholdPercent / 100)
+```
+
+Choose `Compaction threshold mode` and `Handoff trigger` in `/continue settings [project|global]`. In `reserve-tokens` mode, the trigger editor writes Pi's canonical `compaction.reserveTokens` value at the selected scope. In `percentage` mode, it writes only `compactionThresholdPercent` to the selected `pi-continue.json`; it never rewrites shared Pi settings, so concurrent sessions with different model context windows receive independent token thresholds.
+
+Pi's default compaction settings are:
 
 ```json
 {
@@ -88,7 +96,9 @@ Configure the threshold directly in Pi settings, or choose `Handoff trigger` in 
 }
 ```
 
-`reserveTokens` and `keepRecentTokens` are absolute token counts. For a 272K context model, an explicit `reserveTokens: 68000` triggers near 75 percent usage. The `/continue settings` control shows and edits the human trigger token count, then saves Pi's canonical `compaction.reserveTokens` value at the selected settings scope; the trigger is not stored in `pi-continue.json`. See [`examples/pi-settings-compaction-75pct-272k.json`](examples/pi-settings-compaction-75pct-272k.json).
+`reserveTokens` and `keepRecentTokens` remain absolute token counts used by Pi's compaction preparation. For a 272K context model, an explicit `reserveTokens: 68000` triggers near 75 percent usage in `reserve-tokens` mode. See [`examples/pi-settings-compaction-75pct-272k.json`](examples/pi-settings-compaction-75pct-272k.json).
+
+When `percentage` mode is selected, pi-continue coordinates only automatic `threshold` compactions. It cancels a Pi threshold event that arrives before the configured percentage, starts package-owned compaction at a completed turn boundary when the percentage arrives before Pi's native threshold, and leaves manual compaction and overflow recovery unchanged. If current usage is unavailable, native compaction is allowed to proceed instead of risking a missed overflow recovery.
 
 The automatic guard starts only when Pi can prepare a native compaction. If the threshold is crossed because of static prompt/tool/context overhead, or because all transcript history is still inside `keepRecentTokens`, `pi-continue` skips that checkpoint instead of starting a handoff that native compaction cannot save. UI sessions show a de-duplicated warning for skipped checkpoints.
 
@@ -126,6 +136,8 @@ Default package config:
   "agentGuideSyncMode": "off",
   "midRunGuardEnabled": true,
   "adoptNativeCompaction": false,
+  "compactionThresholdMode": "reserve-tokens",
+  "compactionThresholdPercent": 90,
   "appendCompactionMetadata": false,
   "appendReadFileTags": false,
   "appendModifiedFileTags": true,
@@ -141,6 +153,8 @@ Common settings:
 | `enabled` | Turns package behavior on or off. |
 | `midRunGuardEnabled` | Enables automatic mid-run continuation. |
 | `adoptNativeCompaction` | `false` by default; when enabled, adopts Pi's natural end-of-turn threshold compaction for a same-session handoff and resume, with native compaction as the fallback. |
+| `compactionThresholdMode` | `"reserve-tokens"` by default for backward compatibility; `"percentage"` computes an automatic threshold from each session's current model without changing Pi settings. |
+| `compactionThresholdPercent` | Percentage used by `"percentage"` mode; must be above `0` and below `100`, and defaults to `90`. |
 | `summarizerModel` | Uses the active Pi model with `"inherit"`, or a pinned `"provider/model"`. |
 | `reasoning` | Uses Pi's setting with `"inherit"`, or a model-supported thinking level. Unsupported levels are hidden in settings and clamped through Pi's `thinkingLevelMap`. |
 | `historyMaxTokens` | Optional requested history output-token budget; `null` uses Pi-derived default. The effective provider request is clamped to the summarizer model's positive max-output limit when known. |
@@ -154,7 +168,7 @@ Common settings:
 | `promptOverridePolicy` | Chooses project overrides, global overrides, or package defaults. |
 | `showAfterCompact` | `true` by default; surfaces the rendered brief in a temporary TUI panel right after each successful extension-owned compaction. Repeated displays update and focus the latest panel instead of stacking overlays. Set `false` for a silent handoff. |
 
-`/continue settings` also includes a handoff trigger control. It shows one human-facing trigger token count and writes Pi core `compaction.reserveTokens` in `.pi/settings.json` or the global Pi settings file, not a package config key.
+`/continue settings` includes a threshold-mode selector and a handoff-trigger editor. Fixed reserve-token mode shows a token count and writes Pi core `compaction.reserveTokens` in `.pi/settings.json` or the global Pi settings file. Percentage mode shows both the configured percentage and the token threshold for the current model, and writes only the package config.
 
 Malformed JSON config fails loudly. Unknown config keys are ignored by the package parser. Command aliases are not registered.
 

@@ -143,6 +143,37 @@ async function choosePositiveInteger(
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+const FIXED_RESERVE_MODE_LABEL = "Fixed reserve tokens";
+const PERCENTAGE_MODE_LABEL = "Percentage of current model";
+
+function thresholdModeLabel(config: ContinuationConfig): string {
+	return config.compactionThresholdMode === "percentage" ? PERCENTAGE_MODE_LABEL : FIXED_RESERVE_MODE_LABEL;
+}
+
+async function chooseCompactionThresholdMode(ctx: ExtensionCommandContext): Promise<ContinuationConfig["compactionThresholdMode"] | undefined> {
+	const selected = await ctx.ui.select("Compaction threshold mode", [FIXED_RESERVE_MODE_LABEL, PERCENTAGE_MODE_LABEL]);
+	if (selected === FIXED_RESERVE_MODE_LABEL) return "reserve-tokens";
+	if (selected === PERCENTAGE_MODE_LABEL) return "percentage";
+	return undefined;
+}
+
+async function chooseCompactionThresholdPercent(ctx: ExtensionCommandContext, current: number): Promise<number | undefined> {
+	const choice = await ctx.ui.select("Handoff trigger", [`Keep current (${current}%)`, "Set context percentage"]);
+	if (!choice || choice.startsWith("Keep current")) return undefined;
+	const entered = await ctx.ui.input("Handoff trigger", "percentage above 0 and below 100, for example 90");
+	const normalized = entered?.trim().replace(/%$/, "");
+	if (!normalized || !/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(normalized)) {
+		ctx.ui.notify("Handoff trigger must be a number above 0 and below 100.", "warning");
+		return undefined;
+	}
+	const parsed = Number(normalized);
+	if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 100) {
+		ctx.ui.notify("Handoff trigger must be a number above 0 and below 100.", "warning");
+		return undefined;
+	}
+	return parsed;
+}
+
 const CONFIG_KEYS = [
 	"enabled",
 	"summarizerModel",
@@ -154,6 +185,8 @@ const CONFIG_KEYS = [
 	"agentGuideSyncMode",
 	"midRunGuardEnabled",
 	"adoptNativeCompaction",
+	"compactionThresholdMode",
+	"compactionThresholdPercent",
 	"appendCompactionMetadata",
 	"appendReadFileTags",
 	"appendModifiedFileTags",
@@ -210,7 +243,8 @@ export async function runSettingsDialog(pi: ExtensionAPI, ctx: ExtensionCommandC
 			`Agent guide updates: ${config.agentGuideSyncMode} (full replacement only)`,
 			`Automatic mid-run continuation: ${config.midRunGuardEnabled ? "yes" : "no"}`,
 			`Adopt native threshold compaction: ${config.adoptNativeCompaction ? "yes" : "no"}`,
-			`Handoff trigger: ${renderHandoffTrigger(ctx, scope, projectContext.projectRoot)}`,
+			`Compaction threshold mode: ${thresholdModeLabel(config)}`,
+			`Handoff trigger: ${renderHandoffTrigger(ctx, config, scope, projectContext.projectRoot)}`,
 			`Append compaction metadata: ${config.appendCompactionMetadata ? "yes" : "no"}`,
 			`Append read file tags: ${config.appendReadFileTags ? "yes" : "no"}`,
 			`Append modified file tags: ${config.appendModifiedFileTags ? "yes" : "no"}`,
@@ -296,8 +330,24 @@ export async function runSettingsDialog(pi: ExtensionAPI, ctx: ExtensionCommandC
 			}));
 			continue;
 		}
+		if (selected.startsWith("Compaction threshold mode:")) {
+			config = await updateSetting(scope, projectContext.projectRoot, config, async (current) => {
+				const next = await chooseCompactionThresholdMode(ctx);
+				return next ? { ...current, compactionThresholdMode: next } : undefined;
+			});
+			continue;
+		}
 		if (selected.startsWith("Handoff trigger:")) {
-			await updateHandoffTriggerFromDialog(ctx, scope, projectContext.projectRoot);
+			if (config.compactionThresholdMode === "percentage") {
+				const previous = config;
+				config = await updateSetting(scope, projectContext.projectRoot, config, async (current) => {
+					const next = await chooseCompactionThresholdPercent(ctx, current.compactionThresholdPercent);
+					return next !== undefined ? { ...current, compactionThresholdPercent: next } : undefined;
+				});
+				if (config !== previous) ctx.ui.notify(`Updated ${scope} handoff trigger`, "info");
+			} else {
+				await updateHandoffTriggerFromDialog(ctx, scope, projectContext.projectRoot);
+			}
 			continue;
 		}
 		if (selected.startsWith("Append compaction metadata:")) {

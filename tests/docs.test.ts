@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { DEFAULT_CONTINUE_CONFIG } from "../extensions/continue/src/config.ts";
 
 function readText(path: string): string {
-	return readFileSync(path, "utf8");
+	return readFileSync(path, "utf8").replace(/\r\n/g, "\n");
 }
 
 function readJson(path: string): unknown {
@@ -84,7 +84,10 @@ test("ignored local Markdown guides stay out of the package corpus", () => {
 });
 
 test("npm dry-run package contents align with the public contract", () => {
-	const output = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { encoding: "utf8" });
+	const npmArgs = ["pack", "--dry-run", "--json", "--ignore-scripts"];
+	const output = process.platform === "win32"
+		? execFileSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `npm ${npmArgs.join(" ")}`], { encoding: "utf8" })
+		: execFileSync("npm", npmArgs, { encoding: "utf8" });
 	const [candidate] = JSON.parse(output);
 	assert.equal(candidate.name, "pi-continue");
 	const paths = new Set(candidate.files.map((entry) => entry.path));

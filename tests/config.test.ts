@@ -48,10 +48,32 @@ test("loadContinuationConfig uses current-session model, reasoning, guard, and o
 		assert.equal(config.agentGuideSyncMode, "off");
 		assert.equal(config.midRunGuardEnabled, true);
 		assert.equal(config.adoptNativeCompaction, false);
+		assert.equal(config.compactionThresholdMode, "reserve-tokens");
+		assert.equal(config.compactionThresholdPercent, 90);
 		assert.equal(config.appendCompactionMetadata, false);
 		assert.equal(config.appendReadFileTags, false);
 		assert.equal(config.appendModifiedFileTags, true);
 		assert.equal(config.showAfterCompact, true);
+	});
+});
+
+test("loadContinuationConfig normalizes compaction threshold settings", async () => {
+	await withTempAgent(async (root) => {
+		const configDir = join(root, ".pi", "extensions");
+		mkdirSync(configDir, { recursive: true });
+		const configPath = join(configDir, "pi-continue.json");
+		writeFileSync(configPath, JSON.stringify({
+			compactionThresholdMode: "percentage",
+			compactionThresholdPercent: 92.5,
+		}), "utf8");
+		assert.equal(loadContinuationConfig(root).compactionThresholdMode, "percentage");
+		assert.equal(loadContinuationConfig(root).compactionThresholdPercent, 92.5);
+		writeFileSync(configPath, JSON.stringify({
+			compactionThresholdMode: "tokens",
+			compactionThresholdPercent: 100,
+		}), "utf8");
+		assert.equal(loadContinuationConfig(root).compactionThresholdMode, "reserve-tokens");
+		assert.equal(loadContinuationConfig(root).compactionThresholdPercent, 90);
 	});
 });
 
@@ -176,13 +198,19 @@ test("save and reset round-trip the mid-run guard setting", async () => {
 			...DEFAULT_CONTINUE_CONFIG,
 			midRunGuardEnabled: false,
 			adoptNativeCompaction: true,
+			compactionThresholdMode: "percentage",
+			compactionThresholdPercent: 87.5,
 			synthesisTimeoutMs: 2500,
 		});
 		assert.equal(loadContinuationConfig(root).midRunGuardEnabled, false);
 		assert.equal(loadContinuationConfig(root).adoptNativeCompaction, true);
+		assert.equal(loadContinuationConfig(root).compactionThresholdMode, "percentage");
+		assert.equal(loadContinuationConfig(root).compactionThresholdPercent, 87.5);
 		await resetContinuationConfig("project", root);
 		assert.equal(loadContinuationConfig(root).midRunGuardEnabled, true);
 		assert.equal(loadContinuationConfig(root).adoptNativeCompaction, false);
+		assert.equal(loadContinuationConfig(root).compactionThresholdMode, "reserve-tokens");
+		assert.equal(loadContinuationConfig(root).compactionThresholdPercent, 90);
 		assert.equal(loadContinuationConfig(root).synthesisTimeoutMs, 180000);
 		assert.equal(loadContinuationConfig(root).continuationArtifactMode, "always");
 		assert.equal(loadContinuationConfig(root).agentGuideSyncMode, "off");

@@ -1,6 +1,7 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { patchPiCompactionSettings, readPiCompactionSettingsForScope } from "./pi-settings.ts";
-import type { ConfigScope } from "./types.ts";
+import type { ConfigScope, ContinuationConfig } from "./types.ts";
+import { resolveCompactionThreshold } from "./threshold.ts";
 
 function resolveContextWindow(ctx: ExtensionCommandContext): number | undefined {
 	const modelWindow = ctx.model?.contextWindow;
@@ -10,11 +11,19 @@ function resolveContextWindow(ctx: ExtensionCommandContext): number | undefined 
 }
 
 /** Render the selected-scope handoff trigger as the single human-facing token count. */
-export function renderHandoffTrigger(ctx: ExtensionCommandContext, scope: ConfigScope, projectRoot: string): string {
+export function renderHandoffTrigger(
+	ctx: ExtensionCommandContext,
+	config: Pick<ContinuationConfig, "compactionThresholdMode" | "compactionThresholdPercent">,
+	scope: ConfigScope,
+	projectRoot: string,
+): string {
 	const compaction = readPiCompactionSettingsForScope(scope, projectRoot);
-	const contextWindow = resolveContextWindow(ctx);
-	if (contextWindow === undefined || contextWindow <= compaction.reserveTokens) return "unavailable";
-	return `${(contextWindow - compaction.reserveTokens).toLocaleString()} tokens`;
+	const threshold = resolveCompactionThreshold(config, compaction, resolveContextWindow(ctx));
+	if (!threshold) return "unavailable";
+	if (threshold.mode === "percentage") {
+		return `${threshold.percentage}% (${threshold.thresholdTokens.toLocaleString()} tokens for this model)`;
+	}
+	return `${threshold.thresholdTokens.toLocaleString()} tokens`;
 }
 
 function parseTokenCountInput(value: string | undefined): number | undefined {
@@ -32,8 +41,14 @@ async function chooseHandoffTriggerReserveTokens(
 	projectRoot: string,
 ): Promise<number | null | undefined> {
 	const contextWindow = resolveContextWindow(ctx);
+	const compaction = readPiCompactionSettingsForScope(scope, projectRoot);
+	const threshold = resolveCompactionThreshold(
+		{ compactionThresholdMode: "reserve-tokens", compactionThresholdPercent: 90 },
+		compaction,
+		contextWindow,
+	);
 	const options = [
-		`Keep current (${renderHandoffTrigger(ctx, scope, projectRoot)})`,
+		`Keep current (${threshold ? `${threshold.thresholdTokens.toLocaleString()} tokens` : "unavailable"})`,
 		contextWindow === undefined ? undefined : "Set trigger token count",
 		"Use inherited/default trigger for this scope",
 	].filter((option): option is string => option !== undefined);

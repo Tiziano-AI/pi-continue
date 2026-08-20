@@ -24,7 +24,7 @@ import {
 import { buildContinuationDetails, buildContinuationSynthesisTelemetry, parseContinuationDetails } from "./src/details.ts";
 import { SYNTHESIS_ABORT_MESSAGE } from "./src/synthesis-error.ts";
 import { buildLedgerSnapshot, createContinuationLedgerOverlayController } from "./src/ledger-viewer.ts";
-import { decideNativeCompactionAdoption, runMidRunGuard } from "./src/mid-run-guard.ts";
+import { decideNativeCompactionAdoption, runMidRunGuard, runPercentageThresholdGuard } from "./src/mid-run-guard.ts";
 import { PromptPassError, runPromptPass } from "./src/model.ts";
 import { readEffectivePiCompactionSettings } from "./src/pi-settings.ts";
 import { loadPiInternals } from "./src/pi-internals.ts";
@@ -32,6 +32,7 @@ import { compileHistoryPrompt } from "./src/prompt.ts";
 import { resolveProjectContext, writeNormalizedMarkdownFile } from "./src/project.ts";
 import { isContinuationPromptUserMessage } from "./src/prompt-dispatch.ts";
 import { showContinuePalette } from "./src/palette.ts";
+import { shouldDeferNativeThresholdCompaction } from "./src/threshold.ts";
 import {
 	CONTINUATION_PROMPT,
 	armDeferredResumeStartTimeout,
@@ -202,6 +203,10 @@ export default function (pi: ExtensionAPI) {
 		settleWorkingVisuals(ctx, runtime, settlement.eventId);
 	});
 
+	pi.on("turn_end", async (_event, ctx) => {
+		await runPercentageThresholdGuard(pi, ctx, runtime, (eventId) => cleanupPendingOutputWrites(eventId));
+	});
+
 	pi.on("agent_start", async () => {
 		clearNativeCompactionAdoptionCheckpoint(runtime);
 	});
@@ -220,13 +225,30 @@ export default function (pi: ExtensionAPI) {
 		}
 		const projectContext = await resolveProjectContext(pi, ctx.cwd, sessionId);
 		const config = loadContinuationConfig(projectContext.projectRoot);
+		const piSettings = initialOwnerEventId === undefined
+			? readEffectivePiCompactionSettings(projectContext.projectRoot)
+			: undefined;
+		if (
+			initialOwnerEventId === undefined
+			&& event.reason === "threshold"
+			&& event.willRetry !== true
+			&& piSettings
+			&& shouldDeferNativeThresholdCompaction(
+				config,
+				piSettings,
+				ctx.model?.contextWindow,
+				ctx.getContextUsage()?.tokens,
+			)
+		) {
+			return { cancel: true as const };
+		}
 		if (initialOwnerEventId === undefined && (!config.enabled || !config.adoptNativeCompaction)) return undefined;
 		if (initialOwnerEventId !== undefined && !config.enabled) return { cancel: true as const };
 		const internals = await loadPiInternals();
 		let ownerEventId = initialOwnerEventId;
 		let adopted = false;
 		if (ownerEventId === undefined) {
-			const piSettings = readEffectivePiCompactionSettings(projectContext.projectRoot);
+			if (!piSettings) return undefined;
 			const shouldAdopt = decideNativeCompactionAdoption({
 				config,
 				checkpoint: runtime.nativeCompactionAdoptionCheckpoint,

@@ -9,6 +9,8 @@
   "agentGuideSyncMode": "off",
   "midRunGuardEnabled": true,
   "adoptNativeCompaction": false,
+  "compactionThresholdMode": "reserve-tokens",
+  "compactionThresholdPercent": 90,
   "appendCompactionMetadata": false,
   "appendReadFileTags": false,
   "appendModifiedFileTags": true,

@@ -40,7 +40,7 @@
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "check:json": "node -e \"const fs=require('node:fs'); for (const f of ['package.json', ...fs.readdirSync('examples').filter((name) => name.endsWith('.json')).map((name) => 'examples/' + name)]) JSON.parse(fs.readFileSync(f, 'utf8'));\"",
-    "check:pack": "npm pack --dry-run --json --ignore-scripts >/dev/null",
+    "check:pack": "npm pack --dry-run --json --ignore-scripts",
     "gate": "pnpm run typecheck && pnpm test && pnpm run check:json && pnpm run check:pack"
   },
   "peerDependencies": {

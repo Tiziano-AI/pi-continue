@@ -1,6 +1,7 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { resolveHistoryOutputBudget, resolveSummarizerModel } from "./model-settings.ts";
 import { readEffectivePiCompactionSettings } from "./pi-settings.ts";
+import { describeCompactionThreshold, resolveCompactionThreshold } from "./threshold.ts";
 import type {
 	ContinuationConfig,
 	ContinuationLatestEvent,
@@ -44,10 +45,9 @@ function renderConfiguredOutputBudget(config: ContinuationConfig, ctx: Extension
 	return renderResolvedOutputBudget(budget);
 }
 
-function renderSharedCompactionThreshold(ctx: ExtensionCommandContext, reserveTokens: number): string {
-	const contextWindow = ctx.model?.contextWindow;
-	if (!contextWindow || !Number.isFinite(contextWindow) || contextWindow <= reserveTokens) return "unavailable";
-	return `${(contextWindow - reserveTokens).toLocaleString()} tokens`;
+function renderSharedCompactionThreshold(ctx: ExtensionCommandContext, config: ContinuationConfig, reserveTokens: number): string {
+	const threshold = resolveCompactionThreshold(config, { reserveTokens }, ctx.model?.contextWindow);
+	return threshold ? describeCompactionThreshold(threshold) : "unavailable";
 }
 
 function formatTimestamp(value: number | undefined): string {
@@ -99,8 +99,7 @@ function renderTrigger(event: ContinuationLatestEvent): string {
 	if (!event.trigger) return "manual request";
 	return [
 		`${event.trigger.estimatedTokens.toLocaleString()}/${event.trigger.contextWindow.toLocaleString()} estimated tokens`,
-		`threshold ${event.trigger.thresholdTokens.toLocaleString()}`,
-		`reserve ${event.trigger.reserveTokens.toLocaleString()}`,
+		`threshold ${describeCompactionThreshold(event.trigger)}`,
 	].join(", ");
 }
 
@@ -277,8 +276,10 @@ export function renderStatus(
 		`- Agent guide updates: ${config.agentGuideSyncMode}`,
 		`- Agent guide writes: ${config.agentGuideSyncMode === "always" ? "full replacement only" : "off"}`,
 		`- Automatic mid-run continuation: ${config.midRunGuardEnabled ? "yes" : "no"}`,
+		`- Compaction threshold mode: ${config.compactionThresholdMode}`,
+		`- Effective handoff trigger: ${renderSharedCompactionThreshold(ctx, config, piCompactionSettings.reserveTokens)}`,
 		`- Adopt native threshold compaction: ${config.adoptNativeCompaction ? "yes" : "no"} (synthesis timeout cap 180,000 ms)`,
-		`- Append compaction metadata: ${config.appendCompactionMetadata ? "yes" : "no"}`,,
+		`- Append compaction metadata: ${config.appendCompactionMetadata ? "yes" : "no"}`,
 		`- Append read file tags: ${config.appendReadFileTags ? "yes" : "no"}`,
 		`- Append modified file tags: ${config.appendModifiedFileTags ? "yes" : "no"}`,
 		`- Prompt override policy: ${config.promptOverridePolicy}`,
@@ -287,7 +288,7 @@ export function renderStatus(
 		`## Pi Core Compaction`,
 		`- Enabled: ${piCompactionSettings.enabled ? "yes" : "no"}`,
 		`- Reserve tokens: ${piCompactionSettings.reserveTokens}`,
-		`- Trigger: ${renderSharedCompactionThreshold(ctx, piCompactionSettings.reserveTokens)}`,
+		`- Native trigger: ${renderSharedCompactionThreshold(ctx, { ...config, compactionThresholdMode: "reserve-tokens" }, piCompactionSettings.reserveTokens)}`,
 		`- Keep recent: ${piCompactionSettings.keepRecentTokens}`,
 		``,
 		`## What Can Change`,
