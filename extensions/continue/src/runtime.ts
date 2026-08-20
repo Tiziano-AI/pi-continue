@@ -336,6 +336,17 @@ export function startContinuationCompaction(
 			failureGuardKey: guardKey,
 		});
 	}
+	function completeCompaction(): void {
+		runtime.compactionRunning = false;
+		runtime.guardFailureKey = undefined;
+		if (options.continueAfterComplete) {
+			markContinuationCompactionComplete(ctx, runtime, event.id);
+			return;
+		}
+		finishContinuationEvent(runtime, event.id, "completed", undefined);
+		settleWorkingVisuals(ctx, runtime, event.id);
+		notify(ctx, `${label}: handoff saved.`, "info");
+	}
 	function failCompaction(reason: string): void {
 		runtime.compactionRunning = false;
 		if (guardKey) runtime.guardFailureKey = guardKey;
@@ -352,18 +363,15 @@ export function startContinuationCompaction(
 			customInstructions,
 			onComplete: () => {
 				if (!claimCompactionCallback()) return;
-				runtime.compactionRunning = false;
-				runtime.guardFailureKey = undefined;
-				if (options.continueAfterComplete) {
-					markContinuationCompactionComplete(ctx, runtime, event.id);
-					return;
-				}
-				finishContinuationEvent(runtime, event.id, "completed", undefined);
-				settleWorkingVisuals(ctx, runtime, event.id);
-				notify(ctx, `${label}: handoff saved.`, "info");
+				completeCompaction();
 			},
 			onError: () => {
 				if (!claimCompactionCallback()) return;
+				// matching proof 已证明 handoff 落盘，延迟回调不能再把成功状态改写为失败。
+				if (runtime.latestEvent?.id === event.id && runtime.latestEvent.compactionProof.status === "verified") {
+					completeCompaction();
+					return;
+				}
 				failCompaction(compactionFailureReason(runtime, event.id));
 			},
 		});

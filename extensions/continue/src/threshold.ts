@@ -40,6 +40,19 @@ export function hasReachedCompactionThreshold(tokens: number, threshold: Resolve
 		: tokens >= threshold.thresholdTokens;
 }
 
+/** 与 Pi 原生 shouldCompact 保持严格大于边界，避免同一回合并发请求两次压缩。 */
+export function hasCrossedPiNativeCompactionThreshold(
+	tokens: number,
+	piSettings: Pick<PiCompactionSettings, "enabled" | "reserveTokens">,
+	contextWindow: number | undefined,
+): boolean {
+	if (!piSettings.enabled || !Number.isFinite(tokens) || !isUsableContextWindow(contextWindow)) return false;
+	if (!Number.isSafeInteger(piSettings.reserveTokens) || piSettings.reserveTokens <= 0 || contextWindow <= piSettings.reserveTokens) {
+		return false;
+	}
+	return tokens > contextWindow - piSettings.reserveTokens;
+}
+
 export function describeCompactionThreshold(threshold: ResolvedCompactionThreshold): string {
 	if (threshold.mode === "percentage") {
 		return `${threshold.percentage}% (${threshold.thresholdTokens.toLocaleString()} of ${threshold.contextWindow.toLocaleString()} tokens)`;

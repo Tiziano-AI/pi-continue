@@ -6,7 +6,11 @@ import { loadPiInternals } from "./pi-internals.ts";
 import { resolveProjectContext } from "./project.ts";
 import { sendContinuationPrompt } from "./prompt-dispatch.ts";
 import { startContinuationCompaction, type ContinuationRuntimeState } from "./runtime.ts";
-import { hasReachedCompactionThreshold, resolveCompactionThreshold } from "./threshold.ts";
+import {
+	hasCrossedPiNativeCompactionThreshold,
+	hasReachedCompactionThreshold,
+	resolveCompactionThreshold,
+} from "./threshold.ts";
 import { endsWithCompleteToolResultBatch } from "./tool-batches.ts";
 import type {
 	ContextUsageEstimateSnapshot,
@@ -271,6 +275,7 @@ export async function runPercentageThresholdGuard(
 	const contextTokens = ctx.getContextUsage()?.tokens;
 	if (contextTokens === null || contextTokens === undefined || !Number.isFinite(contextTokens)) return;
 	if (!hasReachedCompactionThreshold(contextTokens, threshold)) return;
+	if (hasCrossedPiNativeCompactionThreshold(contextTokens, piSettings, ctx.model.contextWindow)) return;
 	const trigger: MidRunGuardTrigger = {
 		...threshold,
 		estimatedTokens: contextTokens,

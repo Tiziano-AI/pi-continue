@@ -1017,6 +1017,108 @@ test("percentage threshold exact match starts at an equal Pi token boundary", as
 	}
 });
 
+test("percentage threshold yields to one Pi native compaction after crossing the strict native boundary", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-percentage-native-"));
+	const faux = registerFauxProvider();
+	try {
+		writePercentageConfig(cwd, 90, { adoptNativeCompaction: true });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 5, keepRecentTokens: 10 },
+		}), "utf8");
+		faux.setResponses([fauxAssistantMessage(continuationArtifactJson())]);
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...faux.models[0], contextWindow: 100 };
+		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
+		ctx.getContextUsage = () => ({ tokens: 96, percent: 96, contextWindow: 100 });
+		ctx.isIdle = () => false;
+		ctx.setBranch(compactableToolBranch());
+		registerContinueExtension(pi);
+		await pi.events.get("message_end")({ message: assistantMessage("stop") }, ctx);
+		await pi.events.get("turn_end")({ message: assistantMessage("stop"), toolResults: [] }, ctx);
+		assert.equal(ctx.compactCount, 0);
+		assert.equal(ctx.compactOptions, undefined);
+		const result = await pi.events.get("session_before_compact")(
+			compactionEvent({
+				settings: { enabled: true, reserveTokens: 5, keepRecentTokens: 10 },
+			}, [], { reason: "threshold", willRetry: false }),
+			ctx,
+		);
+		assert.ok(result?.compaction);
+		assert.equal(result.compaction.details.continuationEventId, "continue-1");
+		const savedEvent = {
+			fromExtension: true,
+			compactionEntry: {
+				id: "compact-native-percentage",
+				summary: result.compaction.summary,
+				details: result.compaction.details,
+			},
+		};
+		await pi.events.get("session_compact")(savedEvent, ctx);
+		await pi.events.get("session_compact")(savedEvent, ctx);
+		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
+		assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
+		await pi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, ctx);
+		await pi.events.get("message_end")({ message: assistantMessage("stop") }, ctx);
+	} finally {
+		faux.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("percentage compaction proof wins when a native compaction finishes before the delayed manual callback", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-percentage-race-"));
+	const faux = registerFauxProvider();
+	try {
+		writePercentageConfig(cwd);
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 5, keepRecentTokens: 10 },
+		}), "utf8");
+		faux.setResponses([fauxAssistantMessage(continuationArtifactJson())]);
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...faux.models[0], contextWindow: 100 };
+		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
+		let contextTokens = 90;
+		ctx.getContextUsage = () => ({ tokens: contextTokens, percent: contextTokens, contextWindow: 100 });
+		ctx.isIdle = () => false;
+		ctx.setBranch(compactableToolBranch());
+		registerContinueExtension(pi);
+		await pi.events.get("message_end")({ message: assistantMessage("stop") }, ctx);
+		await pi.events.get("turn_end")({ message: assistantMessage("stop"), toolResults: [] }, ctx);
+		assert.equal(ctx.compactCount, 1);
+		contextTokens = 96;
+		const result = await pi.events.get("session_before_compact")(
+			compactionEvent({
+				settings: { enabled: true, reserveTokens: 5, keepRecentTokens: 10 },
+			}, [], { reason: "threshold", willRetry: false }),
+			ctx,
+		);
+		assert.ok(result?.compaction);
+		await pi.events.get("session_compact")({
+			fromExtension: true,
+			compactionEntry: {
+				id: "compact-native-won-race",
+				summary: result.compaction.summary,
+				details: result.compaction.details,
+			},
+		}, ctx);
+		assert.deepEqual(pi.sent, []);
+		ctx.compactOptions.onError(new Error("Already compacted"));
+		ctx.compactOptions.onError(new Error("Already compacted"));
+		assert.equal(ctx.compactCount, 1);
+		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
+		assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
+		await pi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, ctx);
+		await pi.events.get("message_end")({ message: assistantMessage("stop") }, ctx);
+	} finally {
+		faux.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("percentage threshold defers only early native threshold compaction and fails open on unknown usage", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-percentage-late-"));
 	try {

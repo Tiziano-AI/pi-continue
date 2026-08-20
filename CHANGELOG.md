@@ -14,6 +14,7 @@ All notable changes to `pi-continue` are documented here.
 
 ### Fixed
 
+- Prevented the percentage guard from scheduling a second compaction after Pi's strict native threshold was already crossed, and kept a matching saved handoff authoritative over a delayed compaction error callback.
 - Kept percentage threshold coordination out of shared Pi `reserveTokens`, while preserving native manual compaction and overflow recovery behavior.
 - Made the artifact-write and threshold integration fixtures independent of machine-global continuation settings.
 - Made the documentation and package validation gate portable across CRLF checkouts and Windows command execution.

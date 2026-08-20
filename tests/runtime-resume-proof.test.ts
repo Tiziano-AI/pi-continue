@@ -166,6 +166,33 @@ test("owned proof before compaction completion waits for completion before resum
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
 });
 
+test("verified proof survives a delayed Already compacted callback", () => {
+	const owner = createContext(false);
+	const ctx = bindContext(owner);
+	const runtime = createContinuationRuntimeState();
+	const continuations = [];
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "mid-run-guard",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: true,
+		continueAfterComplete: true,
+		sendContinuation: (prompt) => continuations.push(prompt),
+	});
+	assert.equal(started, true);
+	acceptContinuationCompactionProof(ctx, runtime, "continue-1", "compact-native");
+	assert.deepEqual(continuations, []);
+	owner.compactOptions.onError(new Error("Already compacted"));
+	assert.equal(runtime.compactionRunning, false);
+	assert.equal(runtime.latestEvent?.status, "running");
+	assert.equal(runtime.latestEvent?.failureReason, undefined);
+	assert.equal(runtime.latestEvent?.compactionProof.status, "verified");
+	assert.equal(runtime.latestEvent?.resume.status, "pending");
+	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
+	owner.compactOptions.onError(new Error("Already compacted"));
+	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
+});
+
 test("owned proof timeout fails closed without sending resume", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
