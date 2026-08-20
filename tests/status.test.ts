@@ -63,6 +63,7 @@ test("renderStatus reports local runtime wiring and artifact behavior", () => {
 		assert.match(rendered, /full agentGuideUpdate\.content replacements/);
 		assert.match(rendered, /- Append read file tags: no/);
 		assert.match(rendered, /- Append modified file tags: yes/);
+		assert.match(rendered, /- Show brief after compaction: no/);
 		assert.match(rendered, /Brief entries guide the receiver; they are not proof that files were written/);
 		assert.match(rendered, /- Scenario: unavailable/);
 	} finally {

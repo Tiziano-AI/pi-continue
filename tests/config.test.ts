@@ -53,7 +53,7 @@ test("loadContinuationConfig uses current-session model, reasoning, guard, and o
 		assert.equal(config.appendCompactionMetadata, false);
 		assert.equal(config.appendReadFileTags, false);
 		assert.equal(config.appendModifiedFileTags, true);
-		assert.equal(config.showAfterCompact, true);
+		assert.equal(config.showAfterCompact, false);
 	});
 });
 
@@ -83,7 +83,7 @@ test("loadContinuationConfig ignores non-boolean showAfterCompact", async () => 
 		mkdirSync(configDir, { recursive: true });
 		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ showAfterCompact: "yes" }), "utf8");
 		const config = loadContinuationConfig(root);
-		assert.equal(config.showAfterCompact, true);
+		assert.equal(config.showAfterCompact, false);
 	});
 });
 
@@ -100,14 +100,14 @@ test("loadContinuationConfig normalizes synthesis timeout", async () => {
 	});
 });
 
-test("loadContinuationConfig preserves explicit mid-run guard false", async () => {
+test("loadContinuationConfig preserves explicit boolean settings", async () => {
 	await withTempAgent(async (root) => {
 		const configDir = join(root, ".pi", "extensions");
 		mkdirSync(configDir, { recursive: true });
-		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ midRunGuardEnabled: false, showAfterCompact: false }), "utf8");
+		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ midRunGuardEnabled: false, showAfterCompact: true }), "utf8");
 		const config = loadContinuationConfig(root);
 		assert.equal(config.midRunGuardEnabled, false);
-		assert.equal(config.showAfterCompact, false);
+		assert.equal(config.showAfterCompact, true);
 	});
 });
 
@@ -176,10 +176,10 @@ test("patchContinuationConfig preserves inherited global settings", async () => 
 			...DEFAULT_CONTINUE_CONFIG,
 			enabled: false,
 		});
-		await patchContinuationConfig("project", root, { showAfterCompact: false });
+		await patchContinuationConfig("project", root, { showAfterCompact: true });
 		const effective = loadContinuationConfig(root);
 		assert.equal(effective.enabled, false);
-		assert.equal(effective.showAfterCompact, false);
+		assert.equal(effective.showAfterCompact, true);
 	});
 });
 
@@ -214,5 +214,6 @@ test("save and reset round-trip the mid-run guard setting", async () => {
 		assert.equal(loadContinuationConfig(root).synthesisTimeoutMs, 180000);
 		assert.equal(loadContinuationConfig(root).continuationArtifactMode, "always");
 		assert.equal(loadContinuationConfig(root).agentGuideSyncMode, "off");
+		assert.equal(loadContinuationConfig(root).showAfterCompact, false);
 	});
 });

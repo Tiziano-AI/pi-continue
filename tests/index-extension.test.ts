@@ -208,6 +208,7 @@ function writeNativeAdoptionConfig(cwd, overrides = {}) {
 	mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
 	writeFileSync(join(cwd, ".pi", "extensions", "pi-continue.json"), JSON.stringify({
 		adoptNativeCompaction: true,
+		compactionThresholdMode: "reserve-tokens",
 		continuationArtifactMode: "off",
 		showAfterCompact: false,
 		...overrides,
@@ -452,6 +453,7 @@ test("mid-run guard chains when the resumed assistant tool loop fills context ag
 			compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
 		}), "utf8");
 		writeFileSync(join(cwd, ".pi", "extensions", "pi-continue.json"), JSON.stringify({
+			compactionThresholdMode: "reserve-tokens",
 			showAfterCompact: false,
 		}), "utf8");
 		const pi = createFakePi(cwd);
@@ -644,6 +646,32 @@ test("settings dialog stores percentage thresholds without rewriting Pi reserve 
 		});
 		assert.equal(existsSync(join(cwd, ".pi", "settings.json")), false);
 		assert.deepEqual(notifications, [["Updated project handoff trigger", "info"]]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("settings dialog toggles the post-compaction brief panel", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-display-settings-"));
+	try {
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		let settingsSelectCount = 0;
+		ctx.ui.select = async (title, options) => {
+			if (title !== "Continuation settings") return undefined;
+			settingsSelectCount += 1;
+			const displayOption = options.find((option) => option.startsWith("Show brief after compaction:"));
+			if (settingsSelectCount === 1) {
+				assert.equal(displayOption, "Show brief after compaction: no");
+				return displayOption;
+			}
+			assert.equal(displayOption, "Show brief after compaction: yes");
+			return "Done";
+		};
+		registerContinueExtension(pi);
+		await pi.commands.get("continue").handler("settings project", ctx);
+		const config = JSON.parse(readFileSync(join(cwd, ".pi", "extensions", "pi-continue.json"), "utf8"));
+		assert.deepEqual(config, { showAfterCompact: true });
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -893,22 +921,54 @@ test("verified proof can arrive before the compaction completion callback", asyn
 	assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
 });
 
-test("session_compact ledger display is transient UI and sends only the same-session resume prompt", async () => {
-	const cwd = process.cwd();
-	const pi = createFakePi(cwd);
-	let customCalls = 0;
-	const ctx = createCommandContext(cwd, async (factory) => {
-		customCalls += 1;
-		factory({ requestRender() {} }, { fg(_color, text) { return text; }, bold(text) { return text; } }, {}, () => {});
-		return undefined;
-	});
-	registerContinueExtension(pi);
-	await pi.commands.get("continue").handler("steer", ctx);
-	ctx.compactOptions.onComplete({});
-	await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
-	await new Promise((resolve) => setTimeout(resolve, 0));
-	assert.equal(customCalls, 1);
-	assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
+test("session_compact keeps the ledger panel closed when post-compaction display is disabled", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-display-off-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "extensions", "pi-continue.json"), JSON.stringify({ showAfterCompact: false }), "utf8");
+		const pi = createFakePi(cwd);
+		let customCalls = 0;
+		const ctx = createCommandContext(cwd, async (factory) => {
+			customCalls += 1;
+			factory({ requestRender() {} }, { fg(_color, text) { return text; }, bold(text) { return text; } }, {}, () => {});
+			return undefined;
+		});
+		registerContinueExtension(pi);
+		await pi.commands.get("continue").handler("steer", ctx);
+		ctx.compactOptions.onComplete({});
+		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		assert.equal(customCalls, 0);
+		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
+		await pi.commands.get("continue").handler("ledger", ctx);
+		assert.equal(customCalls, 1);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("session_compact opens the ledger panel after explicit opt-in", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-display-on-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "extensions", "pi-continue.json"), JSON.stringify({ showAfterCompact: true }), "utf8");
+		const pi = createFakePi(cwd);
+		let customCalls = 0;
+		const ctx = createCommandContext(cwd, async (factory) => {
+			customCalls += 1;
+			factory({ requestRender() {} }, { fg(_color, text) { return text; }, bold(text) { return text; } }, {}, () => {});
+			return undefined;
+		});
+		registerContinueExtension(pi);
+		await pi.commands.get("continue").handler("steer", ctx);
+		ctx.compactOptions.onComplete({});
+		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		assert.equal(customCalls, 1);
+		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
 });
 
 test("percentage threshold starts one owned compaction when it is earlier than Pi native threshold", async () => {

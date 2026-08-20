@@ -59,7 +59,7 @@ export const DEFAULT_CONTINUE_CONFIG: ContinuationConfig = {
 	appendReadFileTags: false,
 	appendModifiedFileTags: true,
 	promptOverridePolicy: "project-override",
-	showAfterCompact: true,
+	showAfterCompact: false,
 };
 
 interface PartialContinuationConfig {

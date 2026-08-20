@@ -142,7 +142,7 @@ Default package config:
   "appendReadFileTags": false,
   "appendModifiedFileTags": true,
   "promptOverridePolicy": "project-override",
-  "showAfterCompact": true
+  "showAfterCompact": false
 }
 ```
 
@@ -166,7 +166,7 @@ Common settings:
 | `appendReadFileTags` | `false` by default; when true, appends current compaction read-file tags. |
 | `appendModifiedFileTags` | `true` by default; when true, appends current compaction modified-file tags. |
 | `promptOverridePolicy` | Chooses project overrides, global overrides, or package defaults. |
-| `showAfterCompact` | `true` by default; surfaces the rendered brief in a temporary TUI panel right after each successful extension-owned compaction. Repeated displays update and focus the latest panel instead of stacking overlays. Set `false` for a silent handoff. |
+| `showAfterCompact` | `false` by default for a silent handoff; set `true` to surface the rendered brief in a temporary TUI panel after each successful extension-owned compaction. Repeated displays update and focus the latest panel instead of stacking overlays. |
 
 `/continue settings` includes a threshold-mode selector and a handoff-trigger editor. Fixed reserve-token mode shows a token count and writes Pi core `compaction.reserveTokens` in `.pi/settings.json` or the global Pi settings file. Percentage mode shows both the configured percentage and the token threshold for the current model, and writes only the package config.
 
@@ -245,7 +245,7 @@ What can change:
 
 - `continuationArtifactMode: "always"` writes the rendered brief under `.pi/continue/` after successful extension-owned compaction.
 - `continuationArtifactMode: "off"` writes no continuation artifact.
-- `showAfterCompact: true` (default) surfaces the rendered brief in a TUI overlay right after compaction completes and reuses the latest panel for repeated displays; set `false` for a silent handoff.
+- `showAfterCompact: false` is the default and keeps automatic handoffs silent; set `true` to surface the rendered brief in a TUI overlay after compaction completes. Repeated displays reuse the latest panel.
 - `agentGuideSyncMode: "off"` is the default.
 - `agentGuideSyncMode: "always"` writes only a full non-null `agentGuideUpdate.content` replacement to the configured agent-guide path.
 - Writes are normalized and skipped when content is unchanged.
