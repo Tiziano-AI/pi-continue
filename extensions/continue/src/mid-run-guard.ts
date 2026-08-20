@@ -212,6 +212,8 @@ async function startResolvedGuard(
 	internals: Awaited<ReturnType<typeof loadPiInternals>>,
 	onContinuationFailed?: (eventId: string) => void,
 ): Promise<void> {
+	// 自动守卫共享当前 compaction 所有权，重复事件不应再次中止运行或重复告警。
+	if (runtime.compactionRunning) return;
 	const branchEntries = ctx.sessionManager.getBranch();
 	const preparation = internals.prepareCompaction(branchEntries, piSettings);
 	if (!hasNativeCompactionPreparation(preparation, branchEntries, piSettings, internals.estimateTokens)) {

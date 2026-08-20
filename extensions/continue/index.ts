@@ -45,6 +45,7 @@ import {
 	failRunningAwaitingContinuationResume,
 	markAwaitingContinuationResumeStarted,
 	markContinuationCompactionComplete,
+	normalizeMidRunGuardAbortMessage,
 	recordNativeCompactionAdoptionCheckpoint,
 	releaseAdoptedNativeCompaction,
 	settleAwaitingContinuationResumeFromAssistant,
@@ -197,10 +198,11 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("message_end", async (event, ctx) => {
 		if (!isAssistantMessage(event.message)) return;
-		recordNativeCompactionAdoptionCheckpoint(runtime, event.message.stopReason);
-		const settlement = settleAwaitingContinuationResumeFromAssistant(runtime, event.message);
-		if (!settlement) return;
-		settleWorkingVisuals(ctx, runtime, settlement.eventId);
+		const message = normalizeMidRunGuardAbortMessage(runtime, event.message);
+		recordNativeCompactionAdoptionCheckpoint(runtime, message.stopReason);
+		const settlement = settleAwaitingContinuationResumeFromAssistant(runtime, message);
+		if (settlement) settleWorkingVisuals(ctx, runtime, settlement.eventId);
+		if (message !== event.message) return { message };
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {

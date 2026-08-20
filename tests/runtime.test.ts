@@ -9,6 +9,7 @@ import {
 	createContinuationRuntimeState,
 	failRunningAwaitingContinuationResume,
 	markAwaitingContinuationResumeStarted,
+	normalizeMidRunGuardAbortMessage,
 	parseContinuationRequest,
 	recordNativeCompactionAdoptionCheckpoint,
 	releaseAdoptedNativeCompaction,
@@ -107,6 +108,69 @@ test("native adoption checkpoint is normal-stop-only and one-shot", () => {
 	assert.equal(checkpoint?.stopReason, "stop");
 	assert.equal(runtime.nativeCompactionAdoptionCheckpoint, undefined);
 	assert.equal(consumeNativeCompactionAdoptionCheckpoint(runtime), undefined);
+});
+
+test("mid-run guard abort normalization is scoped to active ownership", () => {
+	const abortError = {
+		role: "assistant",
+		provider: "openai",
+		model: "gpt-test",
+		content: [],
+		usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		stopReason: "error",
+		errorMessage: "This operation was aborted",
+		timestamp: 0,
+	};
+	const providerError = { ...abortError, errorMessage: "Provider connection failed" };
+	const idleRuntime = createContinuationRuntimeState();
+	assert.equal(normalizeMidRunGuardAbortMessage(idleRuntime, abortError), abortError);
+
+	const manualOwner = createContext(false);
+	const manualCtx = bindContext(manualOwner);
+	const manualRuntime = createContinuationRuntimeState();
+	startContinuationCompaction(manualCtx, manualRuntime, {
+		source: "command-steer",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: true,
+		continueAfterComplete: false,
+		sendContinuation() {},
+	});
+	assert.equal(normalizeMidRunGuardAbortMessage(manualRuntime, abortError), abortError);
+	manualOwner.compactOptions.onComplete({});
+
+	const successOwner = createContext(false);
+	const successCtx = bindContext(successOwner);
+	const successRuntime = createContinuationRuntimeState();
+	startContinuationCompaction(successCtx, successRuntime, {
+		source: "mid-run-guard",
+		instructions: undefined,
+		trigger,
+		abortActiveRun: true,
+		continueAfterComplete: false,
+		sendContinuation() {},
+	});
+	assert.equal(normalizeMidRunGuardAbortMessage(successRuntime, providerError), providerError);
+	const normalized = normalizeMidRunGuardAbortMessage(successRuntime, abortError);
+	assert.notEqual(normalized, abortError);
+	assert.equal(normalized.stopReason, "aborted");
+	assert.equal(normalized.errorMessage, undefined);
+	successOwner.compactOptions.onComplete({});
+	assert.equal(normalizeMidRunGuardAbortMessage(successRuntime, abortError), abortError);
+
+	const failureOwner = createContext(false);
+	const failureCtx = bindContext(failureOwner);
+	const failureRuntime = createContinuationRuntimeState();
+	startContinuationCompaction(failureCtx, failureRuntime, {
+		source: "mid-run-guard",
+		instructions: undefined,
+		trigger,
+		abortActiveRun: true,
+		continueAfterComplete: false,
+		sendContinuation() {},
+	});
+	failureOwner.compactOptions.onError(new Error("failed"));
+	assert.equal(normalizeMidRunGuardAbortMessage(failureRuntime, abortError), abortError);
 });
 
 test("adopted native compaction owns lifecycle without invoking compact or abort", () => {

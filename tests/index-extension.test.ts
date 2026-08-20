@@ -396,6 +396,95 @@ test("mid-run guard dispatches resume as follow-up after context threshold proof
 	}
 });
 
+test("context guard owns one compaction across an above-native abort boundary", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-context-native-boundary-"));
+	const faux = registerFauxProvider();
+	try {
+		writePercentageConfig(cwd, 90, { adoptNativeCompaction: true });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 25800, keepRecentTokens: 10 },
+		}), "utf8");
+		faux.setResponses([fauxAssistantMessage(continuationArtifactJson())]);
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		const notifications = [];
+		let abortCount = 0;
+		ctx.model = { ...faux.models[0], contextWindow: 258000 };
+		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
+		ctx.getContextUsage = () => ({ tokens: 246577, percent: 95.57, contextWindow: 258000 });
+		ctx.setBranch(compactableToolBranch());
+		ctx.abort = () => {
+			abortCount += 1;
+		};
+		ctx.ui.notify = (message, type) => {
+			notifications.push([message, type]);
+		};
+		registerContinueExtension(pi);
+		const crossingAssistant = {
+			...highUsageAssistantMessage(),
+			usage: {
+				input: 123268,
+				output: 123269,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 246537,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+		const contextEvent = {
+			messages: [userMessage("run tool"), crossingAssistant, toolResultMessage("x".repeat(160))],
+		};
+		await pi.events.get("context")(contextEvent, ctx);
+		await pi.events.get("context")(contextEvent, ctx);
+		assert.equal(ctx.compactCount, 1);
+		assert.equal(abortCount, 0);
+		assert.match(ctx.compactOptions.customInstructions, /Estimated context: 246577 tokens\./);
+
+		const abortedError = {
+			...assistantMessage("error"),
+			content: [],
+			errorMessage: "This operation was aborted",
+			usage: crossingAssistant.usage,
+		};
+		const replacement = await pi.events.get("message_end")({ message: abortedError }, ctx);
+		assert.equal(replacement?.message.stopReason, "aborted");
+		assert.equal(replacement?.message.errorMessage, undefined);
+		await pi.events.get("turn_end")({ message: replacement.message, toolResults: [] }, ctx);
+		assert.equal(ctx.compactCount, 1);
+
+		const result = await pi.events.get("session_before_compact")(
+			compactionEvent({
+				settings: { enabled: true, reserveTokens: 25800, keepRecentTokens: 10 },
+			}, [], { reason: "manual", willRetry: false }),
+			ctx,
+		);
+		assert.ok(result?.compaction);
+		const savedEvent = {
+			fromExtension: true,
+			compactionEntry: {
+				id: "compact-context-owned",
+				summary: result.compaction.summary,
+				details: result.compaction.details,
+			},
+		};
+		await pi.events.get("session_compact")(savedEvent, ctx);
+		await pi.events.get("session_compact")(savedEvent, ctx);
+		assert.deepEqual(pi.sent, []);
+		ctx.compactOptions.onComplete({});
+		ctx.compactOptions.onComplete({});
+		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
+		assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
+		assert.deepEqual(notifications.filter(([, type]) => type !== "info"), []);
+		assert.equal(notifications.filter(([message]) => message.startsWith("automatic continuation: saving handoff")).length, 1);
+		await pi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, ctx);
+		await pi.events.get("message_end")({ message: assistantMessage("stop") }, ctx);
+	} finally {
+		faux.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("mid-run guard skips cleanly when Pi has no compactable session preparation", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-mid-run-no-compactable-"));
 	try {

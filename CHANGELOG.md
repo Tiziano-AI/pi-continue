@@ -14,6 +14,7 @@ All notable changes to `pi-continue` are documented here.
 
 ### Fixed
 
+- Made the context mid-run guard the sole owner of its intentional abort and deferred compaction: duplicate automatic guard events now yield silently, and Pi sees the owned assistant outcome as aborted before its native post-turn threshold check.
 - Prevented the percentage guard from scheduling a second compaction after Pi's strict native threshold was already crossed, and kept a matching saved handoff authoritative over a delayed compaction error callback.
 - Kept percentage threshold coordination out of shared Pi `reserveTokens`, while preserving native manual compaction and overflow recovery behavior.
 - Made the artifact-write and threshold integration fixtures independent of machine-global continuation settings.

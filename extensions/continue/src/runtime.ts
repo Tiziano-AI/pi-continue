@@ -135,6 +135,25 @@ export function getLatestContinuationLedger(runtime: ContinuationRuntimeState): 
 	return runtime.latestLedger;
 }
 
+export function normalizeMidRunGuardAbortMessage(
+	runtime: ContinuationRuntimeState,
+	message: AssistantMessage,
+): AssistantMessage {
+	const activeEvent = runtime.latestEvent;
+	if (
+		!runtime.compactionRunning
+		|| activeEvent?.source !== "mid-run-guard"
+		|| !isActiveRunningContinuationEvent(runtime, activeEvent.id)
+		|| message.stopReason !== "error"
+		|| typeof message.errorMessage !== "string"
+		|| !message.errorMessage.toLowerCase().includes("abort")
+	) {
+		return message;
+	}
+	// 只改写当前自动守卫主动中止产生的错误，真实的 provider 错误仍由 Pi 原样处理。
+	return { ...message, stopReason: "aborted", errorMessage: undefined };
+}
+
 /** 只在助手正常结束后开放一次紧邻的阈值压缩资格。 */
 export function recordNativeCompactionAdoptionCheckpoint(
 	runtime: ContinuationRuntimeState,
