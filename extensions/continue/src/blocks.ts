@@ -227,6 +227,21 @@ function extractJsonCandidate(text: string): string {
 	return text;
 }
 
+/**
+ * Best-effort recovery for a specific misplacement smaller/local models produce after
+ * generating a long, deeply nested brief: emitting `agentGuideUpdate` as the last key
+ * inside `brief` instead of as `brief`'s sibling, as if it were just one more brief slot.
+ * A no-op unless the top level is missing `agentGuideUpdate` and `brief` has it, so a
+ * genuinely malformed or duplicated shape still falls through to the unchanged checks below.
+ */
+function recoverMisplacedAgentGuideUpdate(parsed: Record<string, unknown>): Record<string, unknown> {
+	if ("agentGuideUpdate" in parsed) return parsed;
+	const brief = parsed.brief;
+	if (!isRecord(brief) || !("agentGuideUpdate" in brief)) return parsed;
+	const { agentGuideUpdate, ...restBrief } = brief;
+	return { ...parsed, brief: restBrief, agentGuideUpdate };
+}
+
 /** Parse the strict provider-portable JSON history artifact response. */
 export function parseHistoryArtifacts(text: string): HistoryArtifactParseResult {
 	const trimmed = text.trim();
@@ -245,15 +260,17 @@ export function parseHistoryArtifacts(text: string): HistoryArtifactParseResult 
 			throw retryError;
 		}
 	}
-	if (!isRecord(parsed) || !hasExactKeys(parsed, HISTORY_ARTIFACT_KEYS)) return { ok: false, code: "artifact-invalid-shape" };
-	if (parsed.version !== HISTORY_ARTIFACT_VERSION) return { ok: false, code: "artifact-invalid-shape" };
-	const brief = parseBriefEnvelope(parsed.brief);
+	if (!isRecord(parsed)) return { ok: false, code: "artifact-invalid-shape" };
+	const recovered = recoverMisplacedAgentGuideUpdate(parsed);
+	if (!hasExactKeys(recovered, HISTORY_ARTIFACT_KEYS)) return { ok: false, code: "artifact-invalid-shape" };
+	if (recovered.version !== HISTORY_ARTIFACT_VERSION) return { ok: false, code: "artifact-invalid-shape" };
+	const brief = parseBriefEnvelope(recovered.brief);
 	if (!brief) return { ok: false, code: "artifact-invalid-shape" };
-	if (!isRecord(parsed.agentGuideUpdate) || !hasExactKeys(parsed.agentGuideUpdate, AGENT_GUIDE_UPDATE_KEYS)) return { ok: false, code: "artifact-invalid-shape" };
-	const rawContent = parsed.agentGuideUpdate.content;
+	if (!isRecord(recovered.agentGuideUpdate) || !hasExactKeys(recovered.agentGuideUpdate, AGENT_GUIDE_UPDATE_KEYS)) return { ok: false, code: "artifact-invalid-shape" };
+	const rawContent = recovered.agentGuideUpdate.content;
 	if (rawContent !== null && nonEmptyString(rawContent) === undefined) return { ok: false, code: "artifact-invalid-shape" };
 	const agentGuideMd = rawContent === null ? undefined : nullableString(rawContent);
-	const agentGuideChangeReason = nonEmptyString(parsed.agentGuideUpdate.reason);
+	const agentGuideChangeReason = nonEmptyString(recovered.agentGuideUpdate.reason);
 	if (!agentGuideChangeReason) return { ok: false, code: "artifact-invalid-shape" };
 	return {
 		ok: true,

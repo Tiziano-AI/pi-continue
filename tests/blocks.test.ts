@@ -88,6 +88,30 @@ test("parseHistoryArtifacts still rejects genuinely invalid JSON even inside a f
 	parseFail("```json\n{not valid json\n```", "artifact-invalid-json");
 });
 
+test("parseHistoryArtifacts recovers agentGuideUpdate nested inside brief instead of alongside it", () => {
+	const misplaced = {
+		version: "pi-continue-artifacts/v4",
+		brief: {
+			...briefEnvelope(),
+			agentGuideUpdate: { content: null, reason: "no durable guide change this cycle" },
+		},
+	};
+	const parsed = parseOk(JSON.stringify(misplaced));
+	assert.equal(parsed.agentGuideChangeReason, "no durable guide change this cycle");
+});
+
+test("parseHistoryArtifacts does not recover agentGuideUpdate duplicated in both places", () => {
+	const duplicated = {
+		version: "pi-continue-artifacts/v4",
+		brief: {
+			...briefEnvelope(),
+			agentGuideUpdate: { content: null, reason: "duplicate inside brief" },
+		},
+		agentGuideUpdate: { content: null, reason: "top-level copy" },
+	};
+	parseFail(JSON.stringify(duplicated));
+});
+
 test("parseHistoryArtifacts accepts the current v4 structured JSON artifact contract", () => {
 	const parsed = parseOk(validArtifacts);
 	assert.deepEqual(parsed, {
