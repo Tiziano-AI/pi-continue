@@ -75,6 +75,19 @@ test("parseHistoryArtifacts returns diagnostics for empty, non-JSON, and wrong-s
 	parseFail(JSON.stringify({ version: "wrong", brief: briefEnvelope(), agentGuideUpdate: { content: null, reason: "ok" } }));
 });
 
+test("parseHistoryArtifacts recovers a JSON artifact wrapped in a markdown code fence", () => {
+	parseOk("```json\n" + validArtifacts + "\n```");
+	parseOk("```\n" + validArtifacts + "\n```");
+});
+
+test("parseHistoryArtifacts recovers a JSON artifact surrounded by prose", () => {
+	parseOk(`Here is the summary:\n\n${validArtifacts}\n\nHope that helps!`);
+});
+
+test("parseHistoryArtifacts still rejects genuinely invalid JSON even inside a fence", () => {
+	parseFail("```json\n{not valid json\n```", "artifact-invalid-json");
+});
+
 test("parseHistoryArtifacts accepts the current v4 structured JSON artifact contract", () => {
 	const parsed = parseOk(validArtifacts);
 	assert.deepEqual(parsed, {

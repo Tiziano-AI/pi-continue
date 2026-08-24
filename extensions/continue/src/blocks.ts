@@ -210,6 +210,23 @@ export function extractTaggedBlock(text: string, tag: string): string | undefine
 	return content && content.length > 0 ? content : undefined;
 }
 
+/**
+ * Best-effort recovery of a JSON object from common ways smaller/local models
+ * disobey the "return only the raw JSON object, no fences, no prose" instruction:
+ * wrapping the object in a markdown code fence, or adding a sentence of prose
+ * before or after it. Returns the original text unchanged if neither pattern
+ * is found, so callers can distinguish "nothing to retry" from "found a
+ * candidate."
+ */
+function extractJsonCandidate(text: string): string {
+	const fenced = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/i);
+	if (fenced?.[1]?.trim()) return fenced[1].trim();
+	const firstBrace = text.indexOf("{");
+	const lastBrace = text.lastIndexOf("}");
+	if (firstBrace !== -1 && lastBrace > firstBrace) return text.slice(firstBrace, lastBrace + 1);
+	return text;
+}
+
 /** Parse the strict provider-portable JSON history artifact response. */
 export function parseHistoryArtifacts(text: string): HistoryArtifactParseResult {
 	const trimmed = text.trim();
@@ -218,8 +235,15 @@ export function parseHistoryArtifacts(text: string): HistoryArtifactParseResult 
 	try {
 		parsed = JSON.parse(trimmed);
 	} catch (error) {
-		if (error instanceof SyntaxError) return { ok: false, code: "artifact-invalid-json" };
-		throw error;
+		if (!(error instanceof SyntaxError)) throw error;
+		const candidate = extractJsonCandidate(trimmed);
+		if (candidate === trimmed) return { ok: false, code: "artifact-invalid-json" };
+		try {
+			parsed = JSON.parse(candidate);
+		} catch (retryError) {
+			if (retryError instanceof SyntaxError) return { ok: false, code: "artifact-invalid-json" };
+			throw retryError;
+		}
 	}
 	if (!isRecord(parsed) || !hasExactKeys(parsed, HISTORY_ARTIFACT_KEYS)) return { ok: false, code: "artifact-invalid-shape" };
 	if (parsed.version !== HISTORY_ARTIFACT_VERSION) return { ok: false, code: "artifact-invalid-shape" };
