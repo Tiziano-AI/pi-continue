@@ -135,6 +135,12 @@ export function getLatestContinuationLedger(runtime: ContinuationRuntimeState): 
 	return runtime.latestLedger;
 }
 
+const CONTROLLED_MID_RUN_ABORT_MARKER = Symbol("pi-continue-controlled-mid-run-abort");
+
+function hasControlledMidRunAbortMarker(message: AssistantMessage): boolean {
+	return (message as AssistantMessage & Record<symbol, unknown>)[CONTROLLED_MID_RUN_ABORT_MARKER] === true;
+}
+
 export function normalizeMidRunGuardAbortMessage(
 	runtime: ContinuationRuntimeState,
 	message: AssistantMessage,
@@ -150,8 +156,24 @@ export function normalizeMidRunGuardAbortMessage(
 	) {
 		return message;
 	}
-	// 只改写当前自动守卫主动中止产生的错误，真实的 provider 错误仍由 Pi 原样处理。
-	return { ...message, stopReason: "aborted", errorMessage: undefined };
+	// 当前运行已由自动 handoff 接管；先中性收束旧 turn，避免 Pi 将内部控制流渲染成用户可见失败。
+	const normalized = {
+		...message,
+		content: [],
+		stopReason: "stop",
+		errorMessage: undefined,
+	} as AssistantMessage & Record<symbol, unknown>;
+	normalized[CONTROLLED_MID_RUN_ABORT_MARKER] = true;
+	return normalized;
+}
+
+/** 在 UI 完成中性收束后恢复 host 的中止语义，避免 Pi 再发起一次原生压缩。 */
+export function restoreControlledMidRunGuardAbortMessage(message: AssistantMessage): boolean {
+	if (!hasControlledMidRunAbortMarker(message)) return false;
+	message.stopReason = "aborted";
+	message.errorMessage = undefined;
+	delete (message as AssistantMessage & Record<symbol, unknown>)[CONTROLLED_MID_RUN_ABORT_MARKER];
+	return true;
 }
 
 /** 只在助手正常结束后开放一次紧邻的阈值压缩资格。 */

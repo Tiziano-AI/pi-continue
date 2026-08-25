@@ -13,6 +13,7 @@ import {
 	parseContinuationRequest,
 	recordNativeCompactionAdoptionCheckpoint,
 	releaseAdoptedNativeCompaction,
+	restoreControlledMidRunGuardAbortMessage,
 	runContinuationCommand,
 	settleAwaitingContinuationResumeFromAssistant,
 	startAdoptedNativeCompaction,
@@ -115,7 +116,7 @@ test("mid-run guard abort normalization is scoped to active ownership", () => {
 		role: "assistant",
 		provider: "openai",
 		model: "gpt-test",
-		content: [],
+		content: [{ type: "toolCall", id: "partial-call", name: "bash", arguments: { command: "printf unsafe" } }],
 		usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 		stopReason: "error",
 		errorMessage: "This operation was aborted",
@@ -153,8 +154,12 @@ test("mid-run guard abort normalization is scoped to active ownership", () => {
 	assert.equal(normalizeMidRunGuardAbortMessage(successRuntime, providerError), providerError);
 	const normalized = normalizeMidRunGuardAbortMessage(successRuntime, abortError);
 	assert.notEqual(normalized, abortError);
-	assert.equal(normalized.stopReason, "aborted");
+	assert.equal(normalized.stopReason, "stop");
+	assert.deepEqual(normalized.content, []);
 	assert.equal(normalized.errorMessage, undefined);
+	assert.equal(restoreControlledMidRunGuardAbortMessage(normalized), true);
+	assert.equal(normalized.stopReason, "aborted");
+	assert.equal(restoreControlledMidRunGuardAbortMessage(normalized), false);
 	successOwner.compactOptions.onComplete({});
 	assert.equal(normalizeMidRunGuardAbortMessage(successRuntime, abortError), abortError);
 

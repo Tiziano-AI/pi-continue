@@ -48,6 +48,7 @@ import {
 	normalizeMidRunGuardAbortMessage,
 	recordNativeCompactionAdoptionCheckpoint,
 	releaseAdoptedNativeCompaction,
+	restoreControlledMidRunGuardAbortMessage,
 	settleAwaitingContinuationResumeFromAssistant,
 	startAdoptedNativeCompaction,
 	type ContinuationRuntimeState,
@@ -81,6 +82,13 @@ function isAssistantMessage(message: unknown): message is AssistantMessage {
 
 const OUTPUT_WRITE_FAILURE = "Output write failed; check the configured path and permissions.";
 const PENDING_OUTPUT_WRITE_FAILURE = "Output write did not complete before continuation failed.";
+const CONTINUATION_LIFECYCLE_CHANNEL = "pi-continue:handoff-lifecycle";
+
+type ContinuationLifecyclePhase = "controlled-abort" | "failed";
+
+function emitContinuationLifecycle(pi: ExtensionAPI, phase: ContinuationLifecyclePhase, eventId: string): void {
+	pi.events.emit(CONTINUATION_LIFECYCLE_CHANNEL, { phase, eventId });
+}
 
 class ArtifactParseError extends Error {
 	readonly failure: ContinuationSynthesisFailure;
@@ -111,6 +119,7 @@ export default function (pi: ExtensionAPI) {
 	const ledgerOverlay = createContinuationLedgerOverlayController();
 
 	function cleanupPendingOutputWrites(eventId: string): void {
+		emitContinuationLifecycle(pi, "failed", eventId);
 		let removed = false;
 		for (const [writeId, pending] of pendingOutputWrites) {
 			if (pending.eventId !== eventId) continue;
@@ -199,13 +208,23 @@ export default function (pi: ExtensionAPI) {
 	pi.on("message_end", async (event, ctx) => {
 		if (!isAssistantMessage(event.message)) return;
 		const message = normalizeMidRunGuardAbortMessage(runtime, event.message);
-		recordNativeCompactionAdoptionCheckpoint(runtime, message.stopReason);
+		if (message === event.message) {
+			recordNativeCompactionAdoptionCheckpoint(runtime, message.stopReason);
+		} else {
+			// 中性 stop 只用于收束已被 handoff 接管的旧 turn，不能作为新的原生压缩采用检查点。
+			clearNativeCompactionAdoptionCheckpoint(runtime);
+			const eventId = getActiveContinuationEventId(runtime);
+			if (eventId) emitContinuationLifecycle(pi, "controlled-abort", eventId);
+		}
 		const settlement = settleAwaitingContinuationResumeFromAssistant(runtime, message);
 		if (settlement) settleWorkingVisuals(ctx, runtime, settlement.eventId);
 		if (message !== event.message) return { message };
 	});
 
-	pi.on("turn_end", async (_event, ctx) => {
+	pi.on("turn_end", async (event, ctx) => {
+		if (isAssistantMessage(event.message)) {
+			restoreControlledMidRunGuardAbortMessage(event.message);
+		}
 		await runPercentageThresholdGuard(pi, ctx, runtime, (eventId) => cleanupPendingOutputWrites(eventId));
 	});
 
@@ -282,9 +301,9 @@ export default function (pi: ExtensionAPI) {
 		if (!ownerStillActive()) return ownerLostResult();
 		const normalizedPreparation = normalizeCompactionPreparation(event.preparation, event.branchEntries);
 		if (normalizedPreparation.repairedProviderUnsafeSuffix && ctx.hasUI) {
-			ctx.ui.notify("pi-continue summarized a provider-unsafe kept suffix before resuming.", "warning");
+			ctx.ui.notify("pi-continue adjusted the handoff boundary to preserve provider message ordering.", "info");
 		} else if (normalizedPreparation.repairedNoOpCut && ctx.hasUI) {
-			ctx.ui.notify("pi-continue moved the handoff to a safer checkpoint before resuming.", "warning");
+			ctx.ui.notify("pi-continue moved the handoff to a usable checkpoint before resuming.", "info");
 		}
 		// Strip pi-continue's own receiver prompt so the synthesizer never mistakes
 		// our resume wrapper ("Continue from the same-session pi-continue/v4 handoff…")

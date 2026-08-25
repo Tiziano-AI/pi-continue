@@ -51,11 +51,16 @@ function toolResultMessage(text, toolCallId = "tool-1") {
 function createFakePi(cwd) {
 	const commands = new Map();
 	const events = new Map();
+	const lifecycleEvents = [];
+	events.emit = (channel, data) => {
+		lifecycleEvents.push([channel, data]);
+	};
 	const sent = [];
 	const sentOptions = [];
 	return {
 		commands,
 		events,
+		lifecycleEvents,
 		sent,
 		sentOptions,
 		registerCommand(name, command) {
@@ -443,14 +448,21 @@ test("context guard owns one compaction across an above-native abort boundary", 
 
 		const abortedError = {
 			...assistantMessage("error"),
-			content: [],
+			content: [{ type: "toolCall", id: "partial-call", name: "bash", arguments: { command: "printf unsafe" } }],
 			errorMessage: "This operation was aborted",
 			usage: crossingAssistant.usage,
 		};
 		const replacement = await pi.events.get("message_end")({ message: abortedError }, ctx);
-		assert.equal(replacement?.message.stopReason, "aborted");
+		assert.equal(replacement?.message.stopReason, "stop");
+		assert.deepEqual(replacement?.message.content, []);
 		assert.equal(replacement?.message.errorMessage, undefined);
+		assert.deepEqual(pi.lifecycleEvents, [[
+			"pi-continue:handoff-lifecycle",
+			{ phase: "controlled-abort", eventId: "continue-1" },
+		]]);
 		await pi.events.get("turn_end")({ message: replacement.message, toolResults: [] }, ctx);
+		assert.equal(replacement.message.stopReason, "aborted");
+		assert.equal(replacement.message.errorMessage, undefined);
 		assert.equal(ctx.compactCount, 1);
 
 		const result = await pi.events.get("session_before_compact")(
@@ -481,6 +493,40 @@ test("context guard owns one compaction across an above-native abort boundary", 
 		await pi.events.get("message_end")({ message: assistantMessage("stop") }, ctx);
 	} finally {
 		faux.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("failed controlled handoff publishes the matching lifecycle failure", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-controlled-abort-failure-"));
+	try {
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
+		}), "utf8");
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...ctx.model, contextWindow: 100 };
+		ctx.setBranch(compactableToolBranch());
+		registerContinueExtension(pi);
+		await pi.events.get("context")({
+			messages: [userMessage("run tool"), highUsageAssistantMessage(), toolResultMessage("x".repeat(160))],
+		}, ctx);
+		const replacement = await pi.events.get("message_end")({
+			message: {
+				...assistantMessage("error"),
+				content: [],
+				errorMessage: "This operation was aborted",
+			},
+		}, ctx);
+		await pi.events.get("turn_end")({ message: replacement.message, toolResults: [] }, ctx);
+		ctx.compactOptions.onError(new Error("compaction failed"));
+		assert.deepEqual(pi.lifecycleEvents, [
+			["pi-continue:handoff-lifecycle", { phase: "controlled-abort", eventId: "continue-1" }],
+			["pi-continue:handoff-lifecycle", { phase: "failed", eventId: "continue-1" }],
+		]);
+		assert.deepEqual(pi.sent, []);
+	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
@@ -1369,7 +1415,11 @@ test("session_before_compact summarizes provider-unsafe kept suffixes before ret
 			return fauxAssistantMessage(continuationArtifactJson());
 		})]);
 		const pi = createFakePi(cwd);
+		const notifications = [];
 		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.ui.notify = (message, type) => {
+			notifications.push([message, type]);
+		};
 		ctx.model = faux.models[0];
 		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
 		registerContinueExtension(pi);
@@ -1392,6 +1442,10 @@ test("session_before_compact summarizes provider-unsafe kept suffixes before ret
 		assert.equal(result.compaction.firstKeptEntryId, NO_PRE_COMPACTION_MESSAGES_KEPT_ENTRY_ID);
 		assert.deepEqual(result.compaction.details.readFiles, ["/repo/a.ts", "/repo/b.ts"]);
 		assert.match(observedPrompt, /late child output/);
+		assert.deepEqual(notifications, [
+			["/continue steer: saving handoff.", "info"],
+			["pi-continue adjusted the handoff boundary to preserve provider message ordering.", "info"],
+		]);
 		assert.deepEqual(pi.sent, []);
 	} finally {
 		faux.unregister();
