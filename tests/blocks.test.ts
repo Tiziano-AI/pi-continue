@@ -100,6 +100,36 @@ test("parseHistoryArtifacts recovers agentGuideUpdate nested inside brief instea
 	assert.equal(parsed.agentGuideChangeReason, "no durable guide change this cycle");
 });
 
+test("parseHistoryArtifacts recovers a single missing trailing closing brace", () => {
+	const withMissingBrace = validArtifacts.slice(0, -1);
+	assert.equal(validArtifacts.endsWith("}"), true);
+	const parsed = parseOk(withMissingBrace);
+	assert.equal(parsed.agentGuideChangeReason, "no durable guide change this cycle");
+});
+
+test("parseHistoryArtifacts recovers a missing brace together with agentGuideUpdate nested inside brief", () => {
+	const misplaced = {
+		version: "pi-continue-artifacts/v4",
+		brief: {
+			...briefEnvelope(),
+			agentGuideUpdate: { content: null, reason: "no durable guide change this cycle" },
+		},
+	};
+	const serialized = JSON.stringify(misplaced);
+	const parsed = parseOk(serialized.slice(0, -1));
+	assert.equal(parsed.agentGuideChangeReason, "no durable guide change this cycle");
+});
+
+test("parseHistoryArtifacts does not repair text truncated mid-string", () => {
+	const cutMidString = validArtifacts.slice(0, validArtifacts.indexOf('"done_when"') + 30);
+	parseFail(cutMidString, "artifact-invalid-json");
+});
+
+test("parseHistoryArtifacts does not repair text truncated right after a dangling comma", () => {
+	const cutAfterComma = `${JSON.stringify({ version: "pi-continue-artifacts/v4", brief: briefEnvelope() }).slice(0, -1)},`;
+	parseFail(cutAfterComma, "artifact-invalid-json");
+});
+
 test("parseHistoryArtifacts does not recover agentGuideUpdate duplicated in both places", () => {
 	const duplicated = {
 		version: "pi-continue-artifacts/v4",
