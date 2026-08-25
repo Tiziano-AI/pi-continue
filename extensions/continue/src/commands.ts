@@ -17,6 +17,7 @@ import { resolveSummarizerModel } from "./model-settings.ts";
 import { getLatestContinuationEvent, getLatestContinuationLedger, type ContinuationRuntimeState } from "./runtime.ts";
 import { renderStatus } from "./status.ts";
 import { commandHasUi } from "./ui.ts";
+import { CONTINUATION_REASONING_LEVELS, isContinuationReasoning } from "./types.ts";
 import type { ConfigScope, ContinuationConfig, PreviewPayload } from "./types.ts";
 
 interface ParsedScope {
@@ -101,17 +102,17 @@ async function chooseModel(ctx: ExtensionCommandContext): Promise<string | undef
 	return selected;
 }
 
-const ALL_REASONING_OPTIONS: readonly ContinuationConfig["reasoning"][] = ["inherit", "off", "minimal", "low", "medium", "high", "xhigh"];
-
 /** Return operator-selectable reasoning levels, hiding levels unsupported by the resolved summarizer model. */
 export function getReasoningOptionsForModel(model: Model<Api> | undefined): ContinuationConfig["reasoning"][] {
-	if (!model) return [...ALL_REASONING_OPTIONS];
-	return ["inherit", ...getSupportedThinkingLevels(model)];
+	if (!model) return [...CONTINUATION_REASONING_LEVELS];
+	const supportedLevels: readonly string[] = getSupportedThinkingLevels(model);
+	const supported = new Set(supportedLevels);
+	return CONTINUATION_REASONING_LEVELS.filter((level) => level === "inherit" || supported.has(level));
 }
 
 async function chooseReasoning(ctx: ExtensionCommandContext, config: ContinuationConfig): Promise<ContinuationConfig["reasoning"] | undefined> {
 	const selected = await ctx.ui.select("Reasoning level", getReasoningOptionsForModel(resolveSummarizerModel(ctx, config)));
-	return selected as ContinuationConfig["reasoning"] | undefined;
+	return selected !== undefined && isContinuationReasoning(selected) ? selected : undefined;
 }
 
 

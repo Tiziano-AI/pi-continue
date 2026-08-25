@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { isContinuationReasoning } from "./types.ts";
 import type {
 	ConfigScope,
 	ContinuationConfig,
@@ -10,15 +11,6 @@ import type {
 } from "./types.ts";
 import { resolveAgentDir } from "./agent-dir.ts";
 
-const REASONING_LEVELS = new Set<ContinuationReasoning>([
-	"inherit",
-	"off",
-	"minimal",
-	"low",
-	"medium",
-	"high",
-	"xhigh",
-]);
 const PROMPT_OVERRIDE_POLICIES = new Set<PromptOverridePolicy>([
 	"package-default",
 	"global-override",
@@ -159,8 +151,8 @@ function readPartialConfig(path: string): PartialContinuationConfig {
 }
 
 function normalizeReasoning(value: string | undefined): ContinuationReasoning {
-	return value !== undefined && REASONING_LEVELS.has(value as ContinuationReasoning)
-		? (value as ContinuationReasoning)
+	return value !== undefined && isContinuationReasoning(value)
+		? value
 		: DEFAULT_CONTINUE_CONFIG.reasoning;
 }
 

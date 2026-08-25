@@ -45,6 +45,15 @@ test("loadContinuationConfig uses current-session model, reasoning, guard, and o
 	});
 });
 
+test("loadContinuationConfig preserves max reasoning", async () => {
+	await withTempAgent(async (root) => {
+		const configDir = join(root, ".pi", "extensions");
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ reasoning: "max" }), "utf8");
+		assert.equal(loadContinuationConfig(root).reasoning, "max");
+	});
+});
+
 test("loadContinuationConfig ignores non-boolean showAfterCompact", async () => {
 	await withTempAgent(async (root) => {
 		const configDir = join(root, ".pi", "extensions");
