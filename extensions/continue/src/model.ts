@@ -1,10 +1,29 @@
-import type { Api, Model, ModelThinkingLevel, ThinkingLevel } from "@earendil-works/pi-ai";
-import { clampThinkingLevel, completeSimple } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, completeSimple, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolveHistoryOutputBudget, resolveSummarizerModel } from "./model-settings.ts";
-import type { ContinuationConfig, ContinuationSynthesisFailureCode, PromptPassTelemetry } from "./types.ts";
+import { isContinuationModelThinkingLevel } from "./types.ts";
+import type {
+	ContinuationConfig,
+	ContinuationModelThinkingLevel,
+	ContinuationSynthesisFailureCode,
+	PromptPassTelemetry,
+} from "./types.ts";
 
 export { resolveHistoryOutputBudget, resolveSummarizerModel } from "./model-settings.ts";
+
+type ContinuationActiveThinkingLevel = Exclude<ContinuationModelThinkingLevel, "off">;
+type ExtendedSimpleStreamOptions = Omit<SimpleStreamOptions, "reasoning"> & {
+	reasoning?: ContinuationActiveThinkingLevel;
+};
+type CompleteSimpleWithExtendedReasoning = (
+	model: Model<Api>,
+	context: Context,
+	options?: ExtendedSimpleStreamOptions,
+) => Promise<AssistantMessage>;
+
+// Pi 0.84.3 的 compat 运行时支持 max；此边界同时保留 Pi 0.74 的声明兼容性。
+const completeSimpleWithExtendedReasoning = completeSimple as unknown as CompleteSimpleWithExtendedReasoning;
 
 export interface PromptPassResult extends PromptPassTelemetry {
 	text: string;
@@ -54,14 +73,30 @@ function providerAbortCode(parentSignal: AbortSignal, promptPassAbort: PromptPas
 	return parentSignal.aborted ? "provider-aborted" : "provider-error";
 }
 
-function requestedThinkingLevel(pi: Pick<ExtensionAPI, "getThinkingLevel">, config: ContinuationConfig): ModelThinkingLevel {
-	return config.reasoning === "inherit" ? pi.getThinkingLevel() : config.reasoning;
+function requestedThinkingLevel(
+	pi: Pick<ExtensionAPI, "getThinkingLevel">,
+	config: ContinuationConfig,
+): ContinuationModelThinkingLevel {
+	if (config.reasoning !== "inherit") return config.reasoning;
+	const inherited: string = pi.getThinkingLevel();
+	return isContinuationModelThinkingLevel(inherited) ? inherited : "off";
 }
 
 /** Resolve the requested reasoning level through Pi's model-specific thinking capability map. */
-export function resolveReasoningLevel(pi: Pick<ExtensionAPI, "getThinkingLevel">, model: Model<Api>, config: ContinuationConfig): ThinkingLevel | undefined {
+export function resolveReasoningLevel(
+	pi: Pick<ExtensionAPI, "getThinkingLevel">,
+	model: Model<Api>,
+	config: ContinuationConfig,
+): ContinuationActiveThinkingLevel | undefined {
 	if (!model.reasoning) return undefined;
-	const level = clampThinkingLevel(model, requestedThinkingLevel(pi, config));
+	const requested = requestedThinkingLevel(pi, config);
+	if (requested === "max") {
+		const supportedLevels: readonly string[] = getSupportedThinkingLevels(model);
+		if (supportedLevels.includes("max")) return "max";
+		const fallback = clampThinkingLevel(model, "xhigh");
+		return fallback === "off" ? undefined : fallback;
+	}
+	const level = clampThinkingLevel(model, requested);
 	return level === "off" ? undefined : level;
 }
 
@@ -91,10 +126,10 @@ export async function runPromptPass(
 	}
 	const reasoning = resolveReasoningLevel(pi, model, config);
 	let httpStatus: number | undefined;
-	let response: Awaited<ReturnType<typeof completeSimple>>;
+	let response: Awaited<ReturnType<typeof completeSimpleWithExtendedReasoning>>;
 	const promptPassAbort = createPromptPassAbortSignal(signal, config.synthesisTimeoutMs);
 	try {
-		response = await completeSimple(
+		response = await completeSimpleWithExtendedReasoning(
 			model,
 			{
 				systemPrompt: prompt.systemPrompt,

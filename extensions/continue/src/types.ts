@@ -1,11 +1,24 @@
-export type ContinuationReasoning =
-	| "inherit"
-	| "off"
-	| "minimal"
-	| "low"
-	| "medium"
-	| "high"
-	| "xhigh";
+export const CONTINUATION_REASONING_LEVELS = [
+	"inherit",
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+] as const;
+
+export type ContinuationReasoning = (typeof CONTINUATION_REASONING_LEVELS)[number];
+export type ContinuationModelThinkingLevel = Exclude<ContinuationReasoning, "inherit">;
+
+export function isContinuationReasoning(value: string): value is ContinuationReasoning {
+	return CONTINUATION_REASONING_LEVELS.some((level) => level === value);
+}
+
+export function isContinuationModelThinkingLevel(value: string): value is ContinuationModelThinkingLevel {
+	return value !== "inherit" && isContinuationReasoning(value);
+}
 
 export type PromptOverridePolicy = "package-default" | "global-override" | "project-override";
 export type WriteMode = "always" | "off";

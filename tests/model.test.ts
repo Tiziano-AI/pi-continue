@@ -105,6 +105,16 @@ test("resolveHistoryOutputBudget treats nonpositive model max tokens as unavaila
 });
 
 test("getReasoningOptionsForModel hides unsupported model thinking levels", () => {
+	assert.deepEqual(getReasoningOptionsForModel(undefined), [
+		"inherit",
+		"off",
+		"minimal",
+		"low",
+		"medium",
+		"high",
+		"xhigh",
+		"max",
+	]);
 	const summarizer = model({
 		thinkingLevelMap: {
 			off: null,
