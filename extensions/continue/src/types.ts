@@ -1,11 +1,7 @@
-export type ContinuationReasoning =
-	| "inherit"
-	| "off"
-	| "minimal"
-	| "low"
-	| "medium"
-	| "high"
-	| "xhigh";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+
+/** Pi's thinking levels, plus the sentinel that follows Pi's current level. */
+export type ContinuationReasoning = "inherit" | ModelThinkingLevel;
 
 export type PromptOverridePolicy = "package-default" | "global-override" | "project-override";
 export type WriteMode = "always" | "off";
@@ -22,6 +18,7 @@ export interface ContinuationConfig {
 	agentGuidePath: string;
 	agentGuideSyncMode: WriteMode;
 	midRunGuardEnabled: boolean;
+	adoptNativeCompaction: boolean;
 	appendCompactionMetadata: boolean;
 	appendReadFileTags: boolean;
 	appendModifiedFileTags: boolean;
@@ -80,7 +77,7 @@ export interface ParsedHistoryArtifacts {
 	agentGuideChangeReason: string;
 }
 
-export type ContinuationEventSource = "command-steer" | "command-queue" | "mid-run-guard";
+export type ContinuationEventSource = "command-steer" | "command-queue" | "mid-run-guard" | "adopted-compaction";
 export type ContinuationEventStatus = "running" | "completed" | "failed" | "blocked";
 export type ContinuationArtifactStatus = "pending" | "modeled" | "aborted";
 export type ContinuationPromptStatus = "pending" | "sent" | "not-requested" | "failed";
@@ -93,9 +90,11 @@ export type ContinuationSynthesisFailureCode =
 	| "provider-error"
 	| "provider-aborted"
 	| "provider-timeout"
+	| "provider-truncated"
 	| "artifact-empty"
 	| "artifact-invalid-json"
 	| "artifact-invalid-shape"
+	| "artifact-ambiguous"
 	| "internal-error";
 export type ContinuationWriteStatus = "off" | "pending" | "updated" | "unchanged" | "failed" | "no-replacement";
 export type ContinuationOutputWriteTarget = "continuation-artifact" | "agent-guide";
@@ -108,7 +107,7 @@ export interface HistoryOutputBudget {
 	clampedByModel: boolean;
 }
 
-export type HistoryArtifactParseFailureCode = "artifact-empty" | "artifact-invalid-json" | "artifact-invalid-shape";
+export type HistoryArtifactParseFailureCode = "artifact-empty" | "artifact-invalid-json" | "artifact-invalid-shape" | "artifact-ambiguous";
 
 export type HistoryArtifactParseResult =
 	| { ok: true; artifacts: ParsedHistoryArtifacts }
@@ -242,6 +241,24 @@ export interface ContextUsageEstimateSnapshot {
 	usageTokens: number;
 	trailingTokens: number;
 	lastUsageIndex: number | null;
+}
+
+/** One adoptable checkpoint opened by an assistant turn that ended on its own. */
+export interface ContinuationAdoptionCheckpoint {
+	stopReason: string | undefined;
+	openedAt: number;
+}
+
+/**
+ * Local record of how the session reached the current checkpoint.
+ *
+ * Pi's `session_before_compact` event does not say why Pi started compacting, so
+ * adoption is gated on a single-use checkpoint opened when an assistant turn ends
+ * and closed by new user input, a new turn, or the first compaction that claims it.
+ */
+export interface ContinuationTurnProvenance {
+	adoptionCheckpoint: ContinuationAdoptionCheckpoint | undefined;
+	lastAssistantStopReason: string | undefined;
 }
 
 export interface MidRunGuardTrigger {

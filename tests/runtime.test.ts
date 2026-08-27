@@ -9,8 +9,10 @@ import {
 	failRunningAwaitingContinuationResume,
 	markAwaitingContinuationResumeStarted,
 	parseContinuationRequest,
+	releaseAdoptedContinuationCompaction,
 	runContinuationCommand,
 	settleAwaitingContinuationResumeFromAssistant,
+	startAdoptedContinuationCompaction,
 	startContinuationCompaction,
 } from "../extensions/continue/src/runtime.ts";
 
@@ -215,7 +217,7 @@ test("mid-run guard can chain after a resumed assistant tool-use turn", () => {
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(guard, true);
-	assert.equal(owner.aborts, 1);
+	assert.equal(owner.aborts, 0, "ctx.compact() owns the active-run abort");
 	assert.equal(runtime.latestEvent?.id, "continue-2");
 	assert.equal(runtime.latestEvent?.status, "running");
 	assert.equal(runtime.latestEvent?.resume.status, "not-requested");
@@ -486,7 +488,7 @@ test("failed guard records a failure key and blocks identical retries", () => {
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(retry, false);
-	assert.equal(owner.aborts, 2);
+	assert.equal(owner.aborts, 1, "only the blocked retry aborts the over-limit run");
 	assert.equal(runtime.latestEvent?.status, "blocked");
 	assert.equal(runtime.latestEvent?.failureReason, "Repeated over-limit retry was blocked after a failed continuation.");
 });
@@ -552,6 +554,37 @@ test("compaction failures call the pending-write cleanup hook", () => {
 	assert.equal(started, true);
 	owner.compactOptions.onError(new Error("permission denied"));
 	assert.deepEqual(failedEvents, ["continue-1"]);
+});
+
+test("releasing a settled adopted compaction leaves a newer continuation untouched", () => {
+	const releaseOwner = createContext(true);
+	const releaseCtx = bindContext(releaseOwner);
+	const runtime = createContinuationRuntimeState();
+	const releasedEvents = [];
+
+	const staleEventId = startAdoptedContinuationCompaction(releaseCtx, runtime, {
+		trigger,
+		continueAfterComplete: true,
+		sendContinuation: () => {},
+	});
+	assert.equal(staleEventId, "continue-1");
+	// The adopted owner is settled while its synthesis is still running.
+	releaseAdoptedContinuationCompaction(releaseCtx, runtime, staleEventId, (eventId) => releasedEvents.push(eventId));
+	assert.deepEqual(releasedEvents, ["continue-1"]);
+
+	const freshEventId = startAdoptedContinuationCompaction(releaseCtx, runtime, {
+		trigger,
+		continueAfterComplete: true,
+		sendContinuation: () => {},
+	});
+	assert.equal(freshEventId, "continue-2");
+
+	// A late release from the stale handler must not clear the newer owner's state.
+	releaseAdoptedContinuationCompaction(releaseCtx, runtime, staleEventId, (eventId) => releasedEvents.push(eventId));
+	assert.deepEqual(releasedEvents, ["continue-1"]);
+	assert.equal(runtime.activeEventId, "continue-2");
+	assert.equal(runtime.latestEvent?.status, "running");
+	assert.equal(runtime.pendingResumeDispatch?.eventId, "continue-2");
 });
 
 test("runContinuationCommand queue waits for idle before compaction", async () => {

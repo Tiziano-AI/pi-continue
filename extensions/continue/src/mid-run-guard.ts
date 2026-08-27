@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import { loadContinuationConfig } from "./config.ts";
 import { normalizeCompactionPreparation, type ContinuationCompactionPreparation } from "./compaction-preparation.ts";
 import { readEffectivePiCompactionSettings } from "./pi-settings.ts";
@@ -9,6 +9,7 @@ import { startContinuationCompaction, type ContinuationRuntimeState } from "./ru
 import { endsWithCompleteToolResultBatch } from "./tool-batches.ts";
 import type {
 	ContextUsageEstimateSnapshot,
+	ContinuationAdoptionCheckpoint,
 	ContinuationConfig,
 	MidRunGuardTrigger,
 	PiCompactionSettings,
@@ -162,6 +163,56 @@ export function decideMidRunGuardTrigger(input: MidRunGuardDecisionInput): MidRu
 		usageTokens: input.estimate.usageTokens,
 		trailingTokens: input.estimate.trailingTokens,
 		lastUsageIndex: input.estimate.lastUsageIndex,
+	};
+}
+
+/** Stop reasons that mean the assistant finished its own turn rather than erroring or being cancelled. */
+const ADOPTABLE_STOP_REASONS = new Set<string>(["stop", "toolUse", "length"]);
+/** Pi starts its threshold compaction inside the same agent_end processing as the checkpoint. */
+export const ADOPTION_CHECKPOINT_MAX_AGE_MS = 5_000;
+
+export interface AdoptedCompactionDecisionInput {
+	config: ContinuationConfig;
+	piCompactionEnabled: boolean;
+	/** What Pi reported as the trigger of this compaction. */
+	reason: SessionBeforeCompactEvent["reason"];
+	contextWindow: number | undefined;
+	reserveTokens: number;
+	tokensBefore: number;
+	/** Single-use checkpoint already claimed by this compaction, if one was open. */
+	checkpoint: ContinuationAdoptionCheckpoint | undefined;
+	now: number;
+}
+
+/**
+ * Decide whether a compaction Pi started on its own is the automatic
+ * over-threshold checkpoint the package should own.
+ *
+ * Adoption requires Pi's own threshold trigger plus the single-use checkpoint
+ * opened by an assistant turn that ended on its own. A `/compact` request and
+ * context-overflow recovery report their own trigger, and new user input, a new
+ * turn, or an earlier compaction closes the checkpoint, so all of them keep Pi's
+ * native summarizer.
+ */
+export function decideAdoptedCompactionTrigger(input: AdoptedCompactionDecisionInput): MidRunGuardTrigger | undefined {
+	if (!input.config.enabled || !input.config.adoptNativeCompaction) return undefined;
+	if (!input.piCompactionEnabled || input.reason !== "threshold") return undefined;
+	if (!hasUsableContextWindow(input.contextWindow, input.reserveTokens)) return undefined;
+	if (!isFiniteNumber(input.tokensBefore)) return undefined;
+	const checkpoint = input.checkpoint;
+	if (!checkpoint) return undefined;
+	if (input.now - checkpoint.openedAt > ADOPTION_CHECKPOINT_MAX_AGE_MS) return undefined;
+	if (checkpoint.stopReason === undefined || !ADOPTABLE_STOP_REASONS.has(checkpoint.stopReason)) return undefined;
+	const thresholdTokens = input.contextWindow - input.reserveTokens;
+	if (input.tokensBefore <= thresholdTokens) return undefined;
+	return {
+		estimatedTokens: input.tokensBefore,
+		thresholdTokens,
+		contextWindow: input.contextWindow,
+		reserveTokens: input.reserveTokens,
+		usageTokens: input.tokensBefore,
+		trailingTokens: 0,
+		lastUsageIndex: null,
 	};
 }
 

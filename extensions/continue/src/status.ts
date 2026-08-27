@@ -1,6 +1,7 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { resolveHistoryOutputBudget, resolveSummarizerModel } from "./model-settings.ts";
 import { readEffectivePiCompactionSettings } from "./pi-settings.ts";
+import { synthesisFailureLabel } from "./synthesis-error.ts";
 import type {
 	ContinuationConfig,
 	ContinuationLatestEvent,
@@ -57,6 +58,7 @@ function formatTimestamp(value: number | undefined): string {
 
 function sourceLabel(event: ContinuationLatestEvent): string {
 	if (event.source === "mid-run-guard") return "automatic continuation";
+	if (event.source === "adopted-compaction") return "adopted automatic compaction";
 	if (event.source === "command-queue") return "queued /continue";
 	return "/continue steer";
 }
@@ -104,6 +106,7 @@ function renderTrigger(event: ContinuationLatestEvent): string {
 
 function renderSafeBoundary(event: ContinuationLatestEvent): string {
 	if (event.source === "mid-run-guard") return "completed assistant/tool-result batch before the next model request";
+	if (event.source === "adopted-compaction") return "Pi's own over-threshold compaction checkpoint";
 	if (event.source === "command-queue") return "waited until Pi was idle before saving the handoff";
 	return "requested by user; the current assistant turn stops first when needed";
 }
@@ -163,18 +166,6 @@ function renderPassTelemetry(label: string, telemetry: PromptPassTelemetry | und
 	return `- ${label}: requested ${telemetry.requestedModel}${routed}; ${telemetry.usage.totalTokens.toLocaleString()} tokens; ${formatCost(telemetry.usage.costTotal)}${http}${outputBudget}`;
 }
 
-function failureCodeLabel(failure: ContinuationSynthesisFailure): string {
-	if (failure.code === "model-unresolved") return "model unresolved";
-	if (failure.code === "auth-unavailable") return "auth unavailable";
-	if (failure.code === "provider-error") return "provider error";
-	if (failure.code === "provider-aborted") return "provider aborted";
-	if (failure.code === "provider-timeout") return "provider timeout";
-	if (failure.code === "artifact-empty") return "empty artifact";
-	if (failure.code === "artifact-invalid-json") return "invalid JSON";
-	if (failure.code === "artifact-invalid-shape") return "artifact did not match the current v4 JSON contract";
-	return "internal error";
-}
-
 function renderSynthesisFailure(failure: ContinuationSynthesisFailure): string {
 	const kind = failure.kind === "model-provider-call"
 		? "model/provider call failed"
@@ -183,7 +174,7 @@ function renderSynthesisFailure(failure: ContinuationSynthesisFailure): string {
 			: "internal synthesis failure";
 	const requested = failure.requestedModel ? `; requested ${failure.requestedModel}` : "";
 	const http = failure.httpStatus !== undefined ? `; HTTP ${failure.httpStatus}` : "";
-	return `- Synthesis failure: ${kind} during ${failure.pass} pass (${failureCodeLabel(failure)})${requested}${http}.`;
+	return `- Synthesis failure: ${kind} during ${failure.pass} pass (${synthesisFailureLabel(failure.code)})${requested}${http}.`;
 }
 
 function renderSynthesisSummary(event: ContinuationLatestEvent): string[] {
@@ -274,6 +265,7 @@ export function renderStatus(
 		`- Agent guide updates: ${config.agentGuideSyncMode}`,
 		`- Agent guide writes: ${config.agentGuideSyncMode === "always" ? "full replacement only" : "off"}`,
 		`- Automatic mid-run continuation: ${config.midRunGuardEnabled ? "yes" : "no"}`,
+		`- Adopt Pi's over-threshold compaction: ${config.adoptNativeCompaction ? "yes" : "no"}`,
 		`- Append compaction metadata: ${config.appendCompactionMetadata ? "yes" : "no"}`,
 		`- Append read file tags: ${config.appendReadFileTags ? "yes" : "no"}`,
 		`- Append modified file tags: ${config.appendModifiedFileTags ? "yes" : "no"}`,

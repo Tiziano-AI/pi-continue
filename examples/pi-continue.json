@@ -8,6 +8,7 @@
   "agentGuidePath": "AGENTS.md",
   "agentGuideSyncMode": "off",
   "midRunGuardEnabled": true,
+  "adoptNativeCompaction": true,
   "appendCompactionMetadata": false,
   "appendReadFileTags": false,
   "appendModifiedFileTags": true,
