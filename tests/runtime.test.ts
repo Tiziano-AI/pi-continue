@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { markActiveContinuationArtifact } from "../extensions/continue/src/continuation-event.ts";
+import { markActiveContinuationArtifact, recordActiveSynthesisFailure } from "../extensions/continue/src/continuation-event.ts";
 import {
 	CONTINUATION_PROMPT,
 	acceptContinuationCompactionProof,
@@ -566,6 +566,73 @@ test("compaction error preserves synthesis hard-fail reason", () => {
 	owner.compactOptions.onError(new Error("compact failed"));
 	assert.equal(runtime.latestEvent?.status, "failed");
 	assert.equal(runtime.latestEvent?.failureReason, "pi-continue could not create a usable handoff, so continuation stopped before resuming.");
+});
+
+test("handoff failure notification exposes the recorded synthesis classifier", () => {
+	const owner = createContext(false);
+	const ctx = bindContext(owner);
+	ctx.hasUI = true;
+	const notifications = [];
+	ctx.ui.notify = (message, type) => {
+		notifications.push([message, type]);
+	};
+	ctx.ui.setWorkingMessage = () => {};
+	ctx.ui.setWorkingIndicator = () => {};
+	ctx.ui.theme = { fg: () => "" };
+	const runtime = createContinuationRuntimeState();
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "command-steer",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: true,
+		continueAfterComplete: true,
+		sendContinuation: () => {},
+	});
+	assert.equal(started, true);
+	recordActiveSynthesisFailure(runtime, {
+		kind: "model-provider-call",
+		code: "provider-error",
+		pass: "history",
+		requestedModel: "tokenrhythm/deepseek-v4-pro",
+		httpStatus: 429,
+	});
+	markActiveContinuationArtifact(runtime, "aborted", "pi-continue could not create a usable handoff, so continuation stopped before resuming.");
+	owner.compactOptions.onError(new Error("compact failed"));
+	assert.equal(runtime.latestEvent?.status, "failed");
+	const failureNotify = notifications.find(([message]) => message.includes("handoff failed"));
+	assert.ok(failureNotify);
+	assert.match(failureNotify[0], /provider error/);
+	assert.match(failureNotify[0], /HTTP 429/);
+	assert.match(failureNotify[0], /requested tokenrhythm\/deepseek-v4-pro/);
+});
+
+test("handoff failure notification falls back to fixed copy without a classifier", () => {
+	const owner = createContext(false);
+	const ctx = bindContext(owner);
+	ctx.hasUI = true;
+	const notifications = [];
+	ctx.ui.notify = (message, type) => {
+		notifications.push([message, type]);
+	};
+	ctx.ui.setWorkingMessage = () => {};
+	ctx.ui.setWorkingIndicator = () => {};
+	ctx.ui.theme = { fg: () => "" };
+	const runtime = createContinuationRuntimeState();
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "command-steer",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: true,
+		continueAfterComplete: true,
+		sendContinuation: () => {},
+	});
+	assert.equal(started, true);
+	markActiveContinuationArtifact(runtime, "aborted", "pi-continue could not create a usable handoff, so continuation stopped before resuming.");
+	owner.compactOptions.onError(new Error("compact failed"));
+	assert.equal(runtime.latestEvent?.status, "failed");
+	const failureNotify = notifications.find(([message]) => message.includes("handoff failed"));
+	assert.ok(failureNotify);
+	assert.match(failureNotify[0], /could not create a usable handoff/);
 });
 
 test("failed guard records a failure key and blocks identical retries", () => {

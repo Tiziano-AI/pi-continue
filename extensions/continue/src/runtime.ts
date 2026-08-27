@@ -15,6 +15,7 @@ import type {
 	ContinuationLatestEvent,
 	ContinuationLedgerSnapshot,
 	ContinuationResumeStatus,
+	ContinuationSynthesisFailure,
 	MidRunGuardTrigger,
 	NativeCompactionAdoptionCheckpoint,
 } from "./types.ts";
@@ -264,9 +265,39 @@ function finishRunningResumeForChainedContinuation(runtime: ContinuationRuntimeS
 	return true;
 }
 
+/** 把已记录的分类器转成可读诊断，让用户当场区分限流、超时、认证等失败。 */
+function describeSynthesisFailure(failure: ContinuationSynthesisFailure): string {
+	const requested = failure.requestedModel ? `; requested ${failure.requestedModel}` : "";
+	const http = failure.httpStatus !== undefined ? `; HTTP ${failure.httpStatus}` : "";
+	switch (failure.code) {
+		case "model-unresolved":
+			return `handoff model could not be resolved${requested}`;
+		case "auth-unavailable":
+			return `handoff model auth is unavailable${requested}`;
+		case "provider-error":
+			return `handoff model provider error${http}${requested}`;
+		case "provider-aborted":
+			return `handoff synthesis was aborted${requested}`;
+		case "provider-timeout":
+			return `handoff synthesis timed out${requested}`;
+		case "artifact-empty":
+			return "handoff artifact was empty";
+		case "artifact-invalid-json":
+			return "handoff artifact was not valid JSON";
+		case "artifact-invalid-shape":
+			return "handoff artifact did not match the current v4 JSON contract";
+		default:
+			return "internal synthesis failure";
+	}
+}
+
 function compactionFailureReason(runtime: ContinuationRuntimeState, eventId: string): string {
 	const event = runtime.latestEvent;
-	if (event?.id === eventId && event.artifactStatus === "aborted" && event.failureReason) return event.failureReason;
+	if (event?.id === eventId && event.artifactStatus === "aborted") {
+		// 固定文案只作兜底；已记录的分类器能提供可操作的失败方向。
+		if (event.synthesisFailure) return `synthesis failed: ${describeSynthesisFailure(event.synthesisFailure)}`;
+		if (event.failureReason) return event.failureReason;
+	}
 	return COMPACTION_FAILURE;
 }
 
