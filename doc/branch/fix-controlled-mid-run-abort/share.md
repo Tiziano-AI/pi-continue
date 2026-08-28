@@ -10,3 +10,4 @@
 - 备注：`corepack pnpm gate` 的 Windows 嵌套命令问题另由 Issue #25 跟踪，各门禁组件直接运行均通过。
 - 诊断改进：handoff 失败通知优先显示已记录的 synthesis 分类器（provider error + HTTP 状态码 / timeout / aborted / auth / artifact），固定文案只作兜底；用于区分多会话并发时的限流与超时。
 - 机械摇树：新增 `src/shake.ts` 摇树压缩路径——收益（≥1000 tokens/条、累计 ≥10000）时零 LLM 调用完成 handoff，原文 offload 到全局 `~/.pi/agent/offload/<项目slug>/` 并写 `index.jsonl`，最近 15 次工具调用成对保留为压缩后缀，骨架预算按上下文百分比（默认 20%）超限回退 LLM 摘要。配置项：`shakeEnabled` / `shakeThresholdTokens` / `shakeMinSavingsTokens` / `shakeProtectedToolCalls` / `shakeSummaryBudgetPercent`。
+- 摇树恢复引导：摇树 handoff 的事件标记 `shaken`，resume 使用简短版 `SHAKE_CONTINUATION_PROMPT`（告知旧历史被机械压缩、大输出可按摘要路径 read 找回、最近工具轮次完整），不再引用不存在的 LLM brief 结构。

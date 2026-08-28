@@ -16,6 +16,7 @@ import {
 	getActiveContinuationEventId,
 	isActiveRunningContinuationEvent,
 	markContinuationArtifact,
+	markContinuationShaken,
 	planContinuationOutputWrites,
 	recordContinuationSynthesisFailure,
 	recordContinuationSynthesisTelemetry,
@@ -141,6 +142,7 @@ async function evaluateMechanicalShake(
 	if (!plan.viable) return undefined;
 	if (!isActiveRunningContinuationEvent(runtime, ownerEventId)) return undefined;
 	markContinuationArtifact(runtime, ownerEventId, "modeled", undefined);
+	markContinuationShaken(runtime, ownerEventId);
 	const details = buildContinuationDetails(
 		{ read: new Set<string>(), written: new Set<string>(), edited: new Set<string>() },
 		undefined,

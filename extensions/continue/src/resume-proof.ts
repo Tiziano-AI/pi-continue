@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { CONTINUATION_PROMPT } from "./continuation-prompt.ts";
+import { CONTINUATION_PROMPT, SHAKE_CONTINUATION_PROMPT } from "./continuation-prompt.ts";
 import {
 	finishContinuationEvent,
 	isActiveRunningContinuationEvent,
@@ -166,7 +166,11 @@ function dispatchIfReady(ctx: ExtensionContext, runtime: ResumeProofRuntimeState
 	};
 	runtime.awaitingResumeStart = resumeStart;
 	try {
-		pending.sendContinuation(CONTINUATION_PROMPT);
+		// 摇树 handoff 没有 LLM brief，使用简短版恢复引导，避免模型去找不存在的 brief 结构。
+		const prompt = runtime.latestEvent?.id === eventId && runtime.latestEvent.shaken
+			? SHAKE_CONTINUATION_PROMPT
+			: CONTINUATION_PROMPT;
+		pending.sendContinuation(prompt);
 		markContinuationPromptSent(runtime, eventId);
 		if (ctx.isIdle() && isAwaitingResumeStartPending(runtime, eventId)) {
 			scheduleResumeStartTimeout(ctx, runtime, resumeStart);

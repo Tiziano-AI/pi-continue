@@ -10,3 +10,11 @@ export const CONTINUATION_PROMPT = [
 	"brief.next[0] is the queued immediate resume action — use it as the first candidate action unless current instructions or new evidence require adjusting it.",
 	"brief.task and brief.done_when define when you stop.",
 ].join(" ");
+
+/** Same-session resume prompt for the mechanical shake path, which saves no LLM brief. */
+export const SHAKE_CONTINUATION_PROMPT = [
+	"Continue the same work.",
+	"Older history was mechanically compacted without an LLM summary: oversized tool outputs were replaced by placeholders and offloaded; their full text can be read from the paths listed in the compaction summary above.",
+	"Recent tool rounds remain intact.",
+	"Resume the task.",
+].join(" ");

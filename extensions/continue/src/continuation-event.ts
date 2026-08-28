@@ -120,7 +120,7 @@ export function getActiveContinuationEventId(store: ContinuationEventStore): str
 }
 
 /** Record whether the owned continuation produced a modeled ledger or aborted before a usable artifact. */
-export function markContinuationArtifact(
+	export function markContinuationArtifact(
 	store: ContinuationEventStore,
 	eventId: string,
 	status: ContinuationArtifactStatus,
@@ -132,6 +132,17 @@ export function markContinuationArtifact(
 		...event,
 		artifactStatus: status,
 		failureReason: reason ?? event.failureReason,
+	});
+	return true;
+}
+
+/** 标记该 handoff 由机械摇树路径生成（无 LLM 摘要），恢复提示词相应使用简短版。 */
+export function markContinuationShaken(store: ContinuationEventStore, eventId: string): boolean {
+	const event = latestMatching(store, eventId);
+	if (!event || store.activeEventId !== eventId || event.status !== "running") return false;
+	replaceLatest(store, {
+		...event,
+		shaken: true,
 	});
 	return true;
 }

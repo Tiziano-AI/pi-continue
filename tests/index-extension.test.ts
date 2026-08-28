@@ -7,6 +7,7 @@ import { join } from "node:path";
 import registerContinueExtension from "../extensions/continue/index.ts";
 import { buildContinuationArtifactPath } from "../extensions/continue/src/project.ts";
 import { CONTINUATION_PROMPT } from "../extensions/continue/src/runtime.ts";
+import { SHAKE_CONTINUATION_PROMPT } from "../extensions/continue/src/continuation-prompt.ts";
 import { NO_PRE_COMPACTION_MESSAGES_KEPT_ENTRY_ID } from "../extensions/continue/src/compaction-preparation.ts";
 
 function assistantMessage(stopReason = "stop") {
@@ -552,6 +553,10 @@ test("mechanical shake returns a zero-LLM compaction and offloads originals", as
 		const first = JSON.parse(indexLines[0]);
 		assert.equal(first.entryId, "shake-res-1");
 		assert.equal(existsSync(first.path), true);
+		// 摇树 handoff 的恢复使用简短引导词，不引用不存在的 LLM brief 结构。
+		ctx.compactOptions.onComplete({});
+		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+		assert.deepEqual(pi.sent, [SHAKE_CONTINUATION_PROMPT]);
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
