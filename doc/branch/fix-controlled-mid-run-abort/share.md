@@ -9,3 +9,4 @@
 - 主机验证：Pi 0.84.3 RPC 探针完成三次 provider 调用、一次扩展压缩和一次 resume；持久化中止消息无错误文本，最终返回 `resume-ok`，标题序列为 `running -> running -> complete`，未出现中断或错误状态。
 - 备注：`corepack pnpm gate` 的 Windows 嵌套命令问题另由 Issue #25 跟踪，各门禁组件直接运行均通过。
 - 诊断改进：handoff 失败通知优先显示已记录的 synthesis 分类器（provider error + HTTP 状态码 / timeout / aborted / auth / artifact），固定文案只作兜底；用于区分多会话并发时的限流与超时。
+- 机械摇树：新增 `src/shake.ts` 摇树压缩路径——收益（≥1000 tokens/条、累计 ≥10000）时零 LLM 调用完成 handoff，原文 offload 到全局 `~/.pi/agent/offload/<项目slug>/` 并写 `index.jsonl`，最近 15 次工具调用成对保留为压缩后缀，骨架预算按上下文百分比（默认 20%）超限回退 LLM 摘要。配置项：`shakeEnabled` / `shakeThresholdTokens` / `shakeMinSavingsTokens` / `shakeProtectedToolCalls` / `shakeSummaryBudgetPercent`。

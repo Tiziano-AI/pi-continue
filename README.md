@@ -142,7 +142,12 @@ Default package config:
   "appendReadFileTags": false,
   "appendModifiedFileTags": true,
   "promptOverridePolicy": "project-override",
-  "showAfterCompact": false
+  "showAfterCompact": false,
+  "shakeEnabled": true,
+  "shakeThresholdTokens": 1000,
+  "shakeMinSavingsTokens": 10000,
+  "shakeProtectedToolCalls": 15,
+  "shakeSummaryBudgetPercent": 20
 }
 ```
 

@@ -260,6 +260,22 @@ function compactableToolBranch() {
 	];
 }
 
+/** 20 轮工具批次，前 5 轮结果超大（可摇），后 15 轮结果极小（进保护区）。 */
+function shakeableToolBranch() {
+	const entries = [
+		branchMessageEntry("shake-user", null, userMessage("run shake")),
+	];
+	for (let index = 1; index <= 20; index += 1) {
+		const callId = `shake-call-${index}`;
+		entries.push(branchMessageEntry(`shake-asst-${index}`, `shake-call-${index - 1}`, {
+			...assistantMessage("toolUse"),
+			content: [{ type: "toolCall", id: callId, name: "bash", arguments: { command: "printf x" } }],
+		}));
+		entries.push(branchToolResultEntry(`shake-res-${index}`, `shake-asst-${index}`, callId, index <= 5 ? "y".repeat(60000) : "ok", "bash"));
+	}
+	return entries;
+}
+
 function compactionEvent(preparation = {}, branchEntries = [], overrides = {}) {
 	return {
 		preparation: {
@@ -494,6 +510,53 @@ test("context guard owns one compaction across an above-native abort boundary", 
 	} finally {
 		faux.unregister();
 		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("mechanical shake returns a zero-LLM compaction and offloads originals", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-shake-integration-"));
+	const agentDir = mkdtempSync(join(tmpdir(), "pi-continue-shake-agent-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+	try {
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
+		}), "utf8");
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...ctx.model, contextWindow: 1000 };
+		const entries = shakeableToolBranch();
+		ctx.setBranch(entries);
+		registerContinueExtension(pi);
+		await pi.events.get("context")({
+			messages: [
+				userMessage("run shake"),
+				{
+					...assistantMessage("toolUse"),
+					content: [{ type: "toolCall", id: "shake-call-1", name: "bash", arguments: { command: "printf y" } }],
+				},
+				toolResultMessage("y".repeat(60000), "shake-call-1"),
+			],
+		}, ctx);
+		assert.equal(ctx.compactCount, 1);
+		const result = await pi.events.get("session_before_compact")(compactionEvent({}, entries), ctx);
+		assert.ok(result?.compaction);
+		assert.match(result.compaction.summary, /mechanically shaken/);
+		assert.match(result.compaction.summary, /retrieve with the read tool/);
+		assert.equal(result.compaction.firstKeptEntryId, "shake-asst-6");
+		assert.deepEqual(pi.sent, []);
+		assert.equal(existsSync(join(agentDir, "offload", "index.jsonl")), true);
+		const indexLines = readFileSync(join(agentDir, "offload", "index.jsonl"), "utf8").trim().split("\n");
+		assert.equal(indexLines.length, 5);
+		const first = JSON.parse(indexLines[0]);
+		assert.equal(first.entryId, "shake-res-1");
+		assert.equal(existsSync(first.path), true);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(agentDir, { recursive: true, force: true });
 	}
 });
 

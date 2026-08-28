@@ -52,6 +52,11 @@ export const DEFAULT_CONTINUE_CONFIG: ContinuationConfig = {
 	appendModifiedFileTags: true,
 	promptOverridePolicy: "project-override",
 	showAfterCompact: false,
+	shakeEnabled: true,
+	shakeThresholdTokens: 1000,
+	shakeMinSavingsTokens: 10000,
+	shakeProtectedToolCalls: 15,
+	shakeSummaryBudgetPercent: 20,
 };
 
 interface PartialContinuationConfig {
@@ -72,6 +77,11 @@ interface PartialContinuationConfig {
 	appendModifiedFileTags?: boolean;
 	promptOverridePolicy?: string;
 	showAfterCompact?: boolean;
+	shakeEnabled?: boolean;
+	shakeThresholdTokens?: number;
+	shakeMinSavingsTokens?: number;
+	shakeProtectedToolCalls?: number;
+	shakeSummaryBudgetPercent?: number;
 }
 
 export interface ContinuationConfigPatch {
@@ -152,6 +162,16 @@ function parsePartialConfig(value: unknown): PartialContinuationConfig {
 	if (promptOverridePolicy !== undefined) result.promptOverridePolicy = promptOverridePolicy;
 	const showAfterCompact = asBoolean(value.showAfterCompact);
 	if (showAfterCompact !== undefined) result.showAfterCompact = showAfterCompact;
+	const shakeEnabled = asBoolean(value.shakeEnabled);
+	if (shakeEnabled !== undefined) result.shakeEnabled = shakeEnabled;
+	const shakeThresholdTokens = asNumber(value.shakeThresholdTokens);
+	if (shakeThresholdTokens !== undefined) result.shakeThresholdTokens = shakeThresholdTokens;
+	const shakeMinSavingsTokens = asNumber(value.shakeMinSavingsTokens);
+	if (shakeMinSavingsTokens !== undefined) result.shakeMinSavingsTokens = shakeMinSavingsTokens;
+	const shakeProtectedToolCalls = asNumber(value.shakeProtectedToolCalls);
+	if (shakeProtectedToolCalls !== undefined) result.shakeProtectedToolCalls = shakeProtectedToolCalls;
+	const shakeSummaryBudgetPercent = asNumber(value.shakeSummaryBudgetPercent);
+	if (shakeSummaryBudgetPercent !== undefined) result.shakeSummaryBudgetPercent = shakeSummaryBudgetPercent;
 	return result;
 }
 
@@ -214,6 +234,14 @@ function normalizeSummarizerModel(value: string | undefined): string {
 	return trimmed && trimmed.length > 0 ? trimmed : DEFAULT_CONTINUE_CONFIG.summarizerModel;
 }
 
+function normalizePositiveNumber(value: number | undefined, fallback: number): number {
+	return value !== undefined && Number.isFinite(value) && value > 0 ? Math.round(value) : fallback;
+}
+
+function normalizePercent(value: number | undefined, fallback: number): number {
+	return value !== undefined && Number.isFinite(value) && value > 0 && value < 100 ? value : fallback;
+}
+
 function normalizeConfig(partial: PartialContinuationConfig): ContinuationConfig {
 	return {
 		enabled: partial.enabled ?? DEFAULT_CONTINUE_CONFIG.enabled,
@@ -233,6 +261,11 @@ function normalizeConfig(partial: PartialContinuationConfig): ContinuationConfig
 		appendModifiedFileTags: partial.appendModifiedFileTags ?? DEFAULT_CONTINUE_CONFIG.appendModifiedFileTags,
 		promptOverridePolicy: normalizePromptOverridePolicy(partial.promptOverridePolicy),
 		showAfterCompact: partial.showAfterCompact ?? DEFAULT_CONTINUE_CONFIG.showAfterCompact,
+		shakeEnabled: partial.shakeEnabled ?? DEFAULT_CONTINUE_CONFIG.shakeEnabled,
+		shakeThresholdTokens: normalizePositiveNumber(partial.shakeThresholdTokens, DEFAULT_CONTINUE_CONFIG.shakeThresholdTokens),
+		shakeMinSavingsTokens: normalizePositiveNumber(partial.shakeMinSavingsTokens, DEFAULT_CONTINUE_CONFIG.shakeMinSavingsTokens),
+		shakeProtectedToolCalls: normalizePositiveNumber(partial.shakeProtectedToolCalls, DEFAULT_CONTINUE_CONFIG.shakeProtectedToolCalls),
+		shakeSummaryBudgetPercent: normalizePercent(partial.shakeSummaryBudgetPercent, DEFAULT_CONTINUE_CONFIG.shakeSummaryBudgetPercent),
 	};
 }
 

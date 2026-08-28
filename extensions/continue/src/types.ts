@@ -44,6 +44,11 @@ export interface ContinuationConfig {
 	appendModifiedFileTags: boolean;
 	promptOverridePolicy: PromptOverridePolicy;
 	showAfterCompact: boolean;
+	shakeEnabled: boolean;
+	shakeThresholdTokens: number;
+	shakeMinSavingsTokens: number;
+	shakeProtectedToolCalls: number;
+	shakeSummaryBudgetPercent: number;
 }
 
 export interface ResolvedProjectContext {

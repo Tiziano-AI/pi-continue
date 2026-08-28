@@ -31,6 +31,7 @@ import { loadPiInternals } from "./src/pi-internals.ts";
 import { compileHistoryPrompt } from "./src/prompt.ts";
 import { resolveProjectContext, writeNormalizedMarkdownFile } from "./src/project.ts";
 import { isContinuationPromptUserMessage } from "./src/prompt-dispatch.ts";
+import { planMechanicalShake } from "./src/shake.ts";
 import { showContinuePalette } from "./src/palette.ts";
 import { shouldDeferNativeThresholdCompaction } from "./src/threshold.ts";
 import {
@@ -59,7 +60,7 @@ import {
 	NATIVE_COMPACTION_FALLBACK_FAILURE,
 	clearPendingResumeDispatch,
 } from "./src/resume-proof.ts";
-import type { AgentGuideWriteStatus, ContinuationSynthesisFailure, ContinuationSynthesisTelemetry, ParsedHistoryArtifacts, PendingOutputWrite, WriteMode } from "./src/types.ts";
+import type { AgentGuideWriteStatus, ContinuationCompactionDetails, ContinuationConfig, ContinuationSynthesisFailure, ContinuationSynthesisTelemetry, ParsedHistoryArtifacts, PendingOutputWrite, WriteMode } from "./src/types.ts";
 import {
 	clearWorkingVisuals,
 	settleWorkingVisuals,
@@ -99,8 +100,7 @@ class ArtifactParseError extends Error {
 	}
 }
 
-function normalizeSynthesisFailure(error: unknown): ContinuationSynthesisFailure {
-	if (error instanceof PromptPassError) {
+function normalizeSynthesisFailure(error: unknown): ContinuationSynthesisFailure {	if (error instanceof PromptPassError) {
 		return {
 			kind: "model-provider-call",
 			code: error.code,
@@ -111,6 +111,54 @@ function normalizeSynthesisFailure(error: unknown): ContinuationSynthesisFailure
 	}
 	if (error instanceof ArtifactParseError) return error.failure;
 	return { kind: "internal", code: "internal-error", pass: "history" };
+}
+
+/** 机械摇树路径：有收益且骨架在预算内时返回零 LLM 调用的压缩内容，否则回退摘要。 */
+async function evaluateMechanicalShake(
+	ctx: ExtensionContext,
+	runtime: ContinuationRuntimeState,
+	config: ContinuationConfig,
+	event: NativeAwareSessionBeforeCompactEvent,
+	sessionId: string,
+	ownerEventId: string,
+	adopted: boolean,
+): Promise<{ compaction: { summary: string; firstKeptEntryId: string; tokensBefore: number; details: ContinuationCompactionDetails } } | undefined> {
+	const contextWindow = ctx.model?.contextWindow;
+	if (contextWindow === undefined || !Number.isFinite(contextWindow) || contextWindow <= 0) return undefined;
+	let plan;
+	try {
+		plan = planMechanicalShake({
+			config,
+			entries: event.branchEntries,
+			contextWindow,
+			cwd: ctx.cwd,
+			sessionId,
+		});
+	} catch {
+		// offload 写入失败等异常整体回退 LLM 摘要路径。
+		return undefined;
+	}
+	if (!plan.viable) return undefined;
+	if (!isActiveRunningContinuationEvent(runtime, ownerEventId)) return undefined;
+	markContinuationArtifact(runtime, ownerEventId, "modeled", undefined);
+	const details = buildContinuationDetails(
+		{ read: new Set<string>(), written: new Set<string>(), edited: new Set<string>() },
+		undefined,
+		undefined,
+		"write-off",
+		undefined,
+		undefined,
+		ownerEventId,
+	);
+	if (adopted) markContinuationCompactionComplete(ctx, runtime, ownerEventId);
+	return {
+		compaction: {
+			summary: plan.summary,
+			firstKeptEntryId: plan.firstKeptEntryId,
+			tokensBefore: event.preparation.tokensBefore,
+			details,
+		},
+	};
 }
 
 export default function (pi: ExtensionAPI) {
@@ -304,6 +352,11 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("pi-continue adjusted the handoff boundary to preserve provider message ordering.", "info");
 		} else if (normalizedPreparation.repairedNoOpCut && ctx.hasUI) {
 			ctx.ui.notify("pi-continue moved the handoff to a usable checkpoint before resuming.", "info");
+		}
+		// 机械摇树优先：收益足够时零 LLM 调用完成 handoff，只有无收益或异常才回退摘要。
+		if (config.shakeEnabled) {
+			const shakePlan = await evaluateMechanicalShake(ctx, runtime, config, event, sessionId, ownerEventId, adopted);
+			if (shakePlan) return shakePlan;
 		}
 		// Strip pi-continue's own receiver prompt so the synthesizer never mistakes
 		// our resume wrapper ("Continue from the same-session pi-continue/v4 handoff…")
