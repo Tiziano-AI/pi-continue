@@ -207,7 +207,7 @@ export interface ContinuationLatestEvent {
 	synthesis?: ContinuationSynthesisTelemetry;
 	synthesisFailure?: ContinuationSynthesisFailure;
 	failureReason?: string;
-	/** True when the handoff was produced by the mechanical shake path (no LLM synthesis). */
+	/** 标记该 handoff 由机械摇树路径生成（未经过 LLM 合成）。 */
 	shaken?: boolean;
 }
 
