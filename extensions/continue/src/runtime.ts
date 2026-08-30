@@ -85,6 +85,7 @@ const MODE_TOKENS = new Set<string>(["steer", "queue"]);
 const RESUME_START_TIMEOUT_MS = 30_000;
 const BLOCKED_RETRY_FAILURE = "Repeated over-limit retry was blocked after a failed continuation.";
 const COMPACTION_FAILURE = "Continuation handoff failed.";
+const NON_CONTINUATION_RUN_FAILURE = "A newer non-continuation run superseded the pending continuation resume.";
 const RESUME_ABORTED_FAILURE = "Continuation resume was aborted.";
 const RESUME_LIMIT_FAILURE = "Continuation resume stopped before completing because a model limit was reached.";
 const RESUME_NO_ASSISTANT_FAILURE = "Continuation resume did not produce an assistant response.";
@@ -520,6 +521,47 @@ export function markAwaitingContinuationResumeStarted(runtime: ContinuationRunti
 	if (!eventId) return undefined;
 	if (!markContinuationResumeStarted(runtime, eventId)) return undefined;
 	clearResumeStartTimeout(runtime);
+	return eventId;
+}
+
+function hasUnstartedContinuationResume(runtime: ContinuationRuntimeState, eventId: string): boolean {
+	const event = runtime.latestEvent;
+	if (!event || event.id !== eventId) return false;
+	const pending = runtime.pendingResumeDispatch;
+	const pendingDispatchReady = pending?.eventId === eventId
+		&& pending.compactionCompleted
+		&& (event.resume.status === "not-requested" || event.resume.status === "pending");
+	const awaitingPromptStart = runtime.awaitingResumeEventId === eventId && event.resume.status === "pending";
+	return pendingDispatchReady || awaitingPromptStart;
+}
+
+/** 在新的普通回合真正开始时收束尚未启动的旧恢复，避免它绑定后续 Goal 迭代。 */
+export function invalidateUnstartedContinuationResume(
+	ctx: ExtensionContext,
+	runtime: ContinuationRuntimeState,
+	reason = NON_CONTINUATION_RUN_FAILURE,
+): string | undefined {
+	clearStaleAwaitingContinuationResume(runtime);
+	const eventId = runtime.activeEventId;
+	if (!eventId || !isActiveRunningContinuationEvent(runtime, eventId) || !hasUnstartedContinuationResume(runtime, eventId)) {
+		return undefined;
+	}
+	const pending = runtime.pendingResumeDispatch?.eventId === eventId
+		? runtime.pendingResumeDispatch
+		: undefined;
+	const awaiting = runtime.awaitingResumeStart?.eventId === eventId
+		? runtime.awaitingResumeStart
+		: undefined;
+	const onContinuationFailed = pending?.onContinuationFailed ?? awaiting?.onContinuationFailed;
+	onContinuationFailed?.(eventId);
+	clearPendingResumeDispatch(runtime);
+	clearResumeStartTimeout(runtime);
+	runtime.awaitingResumeEventId = undefined;
+	runtime.compactionRunning = false;
+	runtime.controlledMidRunAbortRequested = false;
+	runtime.guardFailureKey = undefined;
+	if (!finishContinuationEvent(runtime, eventId, "failed", reason)) return undefined;
+	settleWorkingVisuals(ctx, runtime, eventId);
 	return eventId;
 }
 

@@ -443,6 +443,65 @@ test("queued follow-up message_start starts same-session resume proof", async ()
 	assert.equal(ctx.workingMessages.at(-1), undefined);
 });
 
+test("ordinary input remains non-destructive until its run boundary", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-input-boundary-window-"));
+	try {
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		registerContinueExtension(pi);
+		await pi.commands.get("continue").handler("steer", ctx);
+		ctx.compactOptions.onComplete({});
+		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+		await pi.events.get("input")({
+			type: "input",
+			text: "new user work",
+			source: "interactive",
+			streamingBehavior: "followUp",
+		}, ctx);
+		await flushHostCompaction();
+		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("ordinary run boundaries supersede deferred resumes for direct and queued input", async () => {
+	const cases = [
+		{ delivery: "before", source: "interactive", streamingBehavior: undefined },
+		{ delivery: "message", source: "interactive", streamingBehavior: "steer" },
+		{ delivery: "message", source: "interactive", streamingBehavior: "followUp" },
+	];
+	for (const scenario of cases) {
+		const cwd = mkdtempSync(join(tmpdir(), `pi-continue-boundary-${scenario.delivery}-`));
+		try {
+			const pi = createFakePi(cwd);
+			const ctx = createCommandContext(cwd, async () => undefined);
+			registerContinueExtension(pi);
+			await pi.commands.get("continue").handler("steer", ctx);
+			ctx.compactOptions.onComplete({});
+			await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+			await pi.events.get("input")({
+				type: "input",
+				text: "new user work",
+				source: scenario.source,
+				streamingBehavior: scenario.streamingBehavior,
+			}, ctx);
+			if (scenario.delivery === "before") {
+				await pi.events.get("before_agent_start")({ prompt: "new user work" }, ctx);
+			} else {
+				await pi.events.get("message_start")({ message: userMessage("new user work") }, ctx);
+			}
+			await flushHostCompaction();
+			assert.deepEqual(pi.sent, []);
+			assert.equal(pi.lifecycleEvents.some(([channel, data]) =>
+				channel === "pi-continue:handoff-lifecycle" && data.phase === "failed" && data.eventId === "continue-1",
+			), true);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	}
+});
+
 test("mid-run guard dispatches resume as follow-up after context threshold proof", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-mid-run-dispatch-"));
 	try {
@@ -664,6 +723,58 @@ test("Goal-owned handoff keeps one pi-continue proof and one Goal resume", async
 		await pi.events.get("message_end")({ message: assistantMessage("stop") }, ctx);
 		assert.equal(ctx.workingMessages.at(-1), undefined);
 		assert.deepEqual(pi.sent, [prompt]);
+		goalMutex.release();
+	} finally {
+		faux.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("a newer Goal iteration does not reuse a superseded pi-continue handoff", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-goal-iteration-race-"));
+	const faux = registerFauxProvider();
+	try {
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
+		}), "utf8");
+		faux.setResponses([fauxAssistantMessage(continuationArtifactJson())]);
+		const pi = enableWorkflowBus(createFakePi(cwd));
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...faux.models[0], contextWindow: 1000 };
+		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
+		const entries = [...compactableToolBranch(), activeGoalContractEntry()];
+		ctx.setBranch(entries);
+		registerContinueExtension(pi);
+		await pi.events.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		const goalMutex = holdWorkflowMutex(pi, ctx.sessionManager);
+		await pi.commands.get("continue").handler("steer", ctx);
+		const before = await pi.events.get("session_before_compact")(compactionEvent({}, entries), ctx);
+		assert.ok(before?.compaction);
+		ctx.compactOptions.onComplete({});
+		await pi.events.get("session_compact")({
+			fromExtension: true,
+			compactionEntry: {
+				id: "compact-goal-iteration-race",
+				summary: before.compaction.summary,
+				details: before.compaction.details,
+			},
+		}, ctx);
+		const ordinaryPrompt = "new user work";
+		await pi.events.get("input")({ type: "input", text: ordinaryPrompt, source: "interactive" }, ctx);
+		await pi.events.get("before_agent_start")({ prompt: ordinaryPrompt }, ctx);
+		await flushHostCompaction();
+		assert.deepEqual(pi.sent, []);
+		const nextPrompt = goalContinuationPrompt().replace("goal-fixture:0:", "goal-fixture:1:");
+		pi.sendUserMessage(nextPrompt, { deliverAs: "followUp" });
+		await pi.events.get("input")({ type: "input", text: nextPrompt, source: "extension" }, ctx);
+		await pi.events.get("before_agent_start")({ prompt: nextPrompt }, ctx);
+		await flushHostCompaction();
+		assert.deepEqual(pi.sent, [nextPrompt]);
+		assert.equal(pi.sent.includes(CONTINUATION_PROMPT), false);
+		assert.equal(pi.lifecycleEvents.filter(([channel, data]) =>
+			channel === "pi-continue:handoff-lifecycle" && data.phase === "failed" && data.eventId === "continue-1",
+		).length, 1);
 		goalMutex.release();
 	} finally {
 		faux.unregister();

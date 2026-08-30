@@ -7,6 +7,7 @@ import {
 	observeCooperativeContinuationPrompt,
 	observeCooperativeContinuationTurn,
 	createContinuationRuntimeState,
+	invalidateUnstartedContinuationResume,
 	markAwaitingContinuationResumeStarted,
 	settleAwaitingContinuationResumeFromAssistant,
 	startContinuationCompaction,
@@ -276,6 +277,61 @@ test("verified proof survives a delayed Already compacted callback", async () =>
 	assert.equal(runtime.latestEvent?.resume.status, "pending");
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
 	owner.compactOptions.onError(new Error("Already compacted"));
+	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
+});
+
+test("new non-continuation input invalidates an unstarted resume and clears deferred work", async () => {
+	const owner = createContext(true);
+	const ctx = bindContext(owner);
+	const runtime = createContinuationRuntimeState();
+	const continuations = [];
+	const failedEvents = [];
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "command-steer",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: false,
+		continueAfterComplete: true,
+		sendContinuation: (prompt) => continuations.push(prompt),
+		onContinuationFailed: (eventId) => failedEvents.push(eventId),
+	});
+	assert.equal(started, true);
+	owner.compactOptions.onComplete({});
+	acceptContinuationCompactionProof(ctx, runtime, "continue-1", "compact-1");
+	assert.equal(runtime.pendingResumeDispatch?.eventId, "continue-1");
+	assert.equal(invalidateUnstartedContinuationResume(ctx, runtime), "continue-1");
+	await flushResumeDispatch();
+	assert.deepEqual(continuations, []);
+	assert.deepEqual(failedEvents, ["continue-1"]);
+	assert.equal(runtime.pendingResumeDispatch, undefined);
+	assert.equal(runtime.awaitingResumeEventId, undefined);
+	assert.equal(runtime.compactionRunning, false);
+	assert.equal(runtime.activeEventId, undefined);
+	assert.equal(runtime.latestEvent?.status, "failed");
+	assert.equal(runtime.latestEvent?.resume.status, "not-requested");
+	assert.equal(runtime.latestEvent?.compactionProof.status, "verified");
+	assert.match(runtime.latestEvent?.failureReason ?? "", /newer non-continuation run superseded/);
+});
+
+test("an already-started resume is preserved when ordinary work begins", async () => {
+	const owner = createContext(true);
+	const ctx = bindContext(owner);
+	const runtime = createContinuationRuntimeState();
+	const continuations = [];
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "command-steer",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: false,
+		continueAfterComplete: true,
+		sendContinuation: (prompt) => continuations.push(prompt),
+	});
+	assert.equal(started, true);
+	await completeAndVerify(owner, ctx, runtime);
+	assert.equal(markAwaitingContinuationResumeStarted(runtime), "continue-1");
+	assert.equal(invalidateUnstartedContinuationResume(ctx, runtime), undefined);
+	assert.equal(runtime.activeEventId, "continue-1");
+	assert.equal(runtime.latestEvent?.resume.status, "running");
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
 });
 

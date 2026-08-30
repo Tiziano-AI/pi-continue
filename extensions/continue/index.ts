@@ -32,6 +32,7 @@ import { loadPiInternals } from "./src/pi-internals.ts";
 import { compileHistoryPrompt } from "./src/prompt.ts";
 import { resolveProjectContext, writeNormalizedMarkdownFile } from "./src/project.ts";
 import { isContinuationPromptUserMessage } from "./src/prompt-dispatch.ts";
+import { SHAKE_CONTINUATION_PROMPT } from "./src/continuation-prompt.ts";
 import { planMechanicalShake } from "./src/shake.ts";
 import { showContinuePalette } from "./src/palette.ts";
 import { shouldDeferNativeThresholdCompaction } from "./src/threshold.ts";
@@ -46,6 +47,7 @@ import {
 	completeContinuationCompactionFromHost,
 	failContinuationCompactionProof,
 	failRunningAwaitingContinuationResume,
+	invalidateUnstartedContinuationResume,
 	markAwaitingContinuationResumeStarted,
 	markContinuationCompactionComplete,
 	markContinuationCompactionRunMode,
@@ -87,6 +89,10 @@ type NativeAwareSessionBeforeCompactEvent = SessionBeforeCompactEvent & {
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
 	return typeof message === "object" && message !== null && "role" in message && message.role === "assistant";
+}
+
+function isUserMessage(message: unknown): boolean {
+	return typeof message === "object" && message !== null && Reflect.get(message, "role") === "user";
 }
 
 function isGoalContinuationUserMessage(message: unknown): boolean {
@@ -237,6 +243,15 @@ export default function (pi: ExtensionAPI) {
 		return observeCooperativeContinuationPrompt(ctx, runtime, eventId);
 	}
 
+	function invalidateSupersededContinuation(ctx: ExtensionContext): void {
+		const eventId = invalidateUnstartedContinuationResume(ctx, runtime);
+		if (eventId) workflowCoordination.releaseEvent(eventId);
+	}
+
+	function isPiContinueResumePrompt(text: string): boolean {
+		return text === CONTINUATION_PROMPT || text === SHAKE_CONTINUATION_PROMPT;
+	}
+
 	function observeSameRunContinuation(ctx: ExtensionContext): void {
 		const eventId = getActiveContinuationEventId(runtime);
 		if (!eventId || !observeCooperativeContinuationTurn(ctx, runtime, eventId)) return;
@@ -294,19 +309,24 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
+		if (isPiContinueResumePrompt(event.prompt)) {
+			const eventId = markAwaitingContinuationResumeStarted(runtime);
+			if (eventId) updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
+			return;
+		}
 		if (observeGoalContinuationPrompt(event.prompt, ctx)) {
 			const eventId = markAwaitingContinuationResumeStarted(runtime);
 			if (eventId) updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
 			return;
 		}
-		if (event.prompt !== CONTINUATION_PROMPT) return;
-		const eventId = markAwaitingContinuationResumeStarted(runtime);
-		if (!eventId) return;
-		updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
+		invalidateSupersededContinuation(ctx);
 	});
 
 	pi.on("message_start", async (event, ctx) => {
-		if (isContinuationPromptUserMessage(event.message, CONTINUATION_PROMPT)) {
+		if (
+			isContinuationPromptUserMessage(event.message, CONTINUATION_PROMPT)
+			|| isContinuationPromptUserMessage(event.message, SHAKE_CONTINUATION_PROMPT)
+		) {
 			const eventId = markAwaitingContinuationResumeStarted(runtime);
 			if (eventId) {
 				updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
@@ -315,9 +335,16 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (isGoalContinuationUserMessage(event.message)) {
 			const messageText = JSON.stringify(event.message);
-			if (!observeGoalContinuationPrompt(messageText, ctx)) return;
-			const eventId = markAwaitingContinuationResumeStarted(runtime);
-			if (eventId) updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
+			if (observeGoalContinuationPrompt(messageText, ctx)) {
+				const eventId = markAwaitingContinuationResumeStarted(runtime);
+				if (eventId) updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
+				return;
+			}
+			if (isUserMessage(event.message)) invalidateSupersededContinuation(ctx);
+			return;
+		}
+		if (isUserMessage(event.message)) {
+			invalidateSupersededContinuation(ctx);
 			return;
 		}
 		if (!isAssistantMessage(event.message)) return;
