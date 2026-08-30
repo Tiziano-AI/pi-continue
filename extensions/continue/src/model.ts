@@ -22,8 +22,25 @@ type CompleteSimpleWithExtendedReasoning = (
 	options?: ExtendedSimpleStreamOptions,
 ) => Promise<AssistantMessage>;
 
-// Pi 0.84.3 的 compat 运行时支持 max；此边界同时保留 Pi 0.74 的声明兼容性。
+interface HostModelRegistry {
+	complete?: CompleteSimpleWithExtendedReasoning;
+}
+
+// 0.84 版本的宿主 registry 才持有实际 provider；旧版本缺少该入口时仍使用同包 compat。
 const completeSimpleWithExtendedReasoning = completeSimple as unknown as CompleteSimpleWithExtendedReasoning;
+
+function completeThroughHostRegistry(
+	ctx: ExtensionContext,
+	model: Model<Api>,
+	context: Context,
+	options: ExtendedSimpleStreamOptions,
+): Promise<AssistantMessage> {
+	const registry = ctx.modelRegistry as unknown as HostModelRegistry;
+	if (typeof registry.complete === "function") {
+		return registry.complete.call(ctx.modelRegistry, model, context, options);
+	}
+	return completeSimpleWithExtendedReasoning(model, context, options);
+}
 
 export interface PromptPassResult extends PromptPassTelemetry {
 	text: string;
@@ -129,7 +146,8 @@ export async function runPromptPass(
 	let response: Awaited<ReturnType<typeof completeSimpleWithExtendedReasoning>>;
 	const promptPassAbort = createPromptPassAbortSignal(signal, config.synthesisTimeoutMs);
 	try {
-		response = await completeSimpleWithExtendedReasoning(
+		response = await completeThroughHostRegistry(
+			ctx,
 			model,
 			{
 				systemPrompt: prompt.systemPrompt,

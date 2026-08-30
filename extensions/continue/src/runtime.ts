@@ -18,11 +18,13 @@ import type {
 	ContinuationSynthesisFailure,
 	MidRunGuardTrigger,
 	NativeCompactionAdoptionCheckpoint,
+	ContinuationResumeOwner,
 } from "./types.ts";
 import {
 	clearPendingResumeDispatch,
 	clearResumeStartTimeout,
 	markContinuationCompactionComplete,
+	markContinuationCompactionCompleteFromHost,
 	notify,
 	preparePendingResumeDispatch,
 	type ResumeProofRuntimeState,
@@ -33,13 +35,14 @@ import {
 } from "./working-ui.ts";
 
 export { CONTINUATION_PROMPT } from "./continuation-prompt.ts";
-export { acceptContinuationCompactionProof, armDeferredResumeStartTimeout, clearResumeStartTimeout, dispatchVerifiedContinuationResume, failContinuationCompactionProof, markContinuationCompactionComplete, verifyContinuationCompactionProof } from "./resume-proof.ts";
+export { acceptContinuationCompactionProof, armContinuationCompactionProofTimeout, armDeferredResumeStartTimeout, clearResumeStartTimeout, dispatchVerifiedContinuationResume, failContinuationCompactionProof, markContinuationCompactionRunMode, markContinuationCompactionComplete, observeCooperativeContinuationPrompt, observeCooperativeContinuationTurn, verifyContinuationCompactionProof } from "./resume-proof.ts";
 
 export type ContinuationRequestMode = "steer" | "queue";
 export type ContinuationRequestSource = Exclude<ContinuationEventSource, "adopted-compaction">;
 
 export interface ContinuationRuntimeState extends ResumeProofRuntimeState {
 	latestLedger: ContinuationLedgerSnapshot | undefined;
+	controlledMidRunAbortRequested: boolean;
 	lastNoCompactableGuardKey: string | undefined;
 	nativeCompactionAdoptionCheckpoint: NativeCompactionAdoptionCheckpoint | undefined;
 }
@@ -55,10 +58,13 @@ export interface StartContinuationCompactionOptions {
 	trigger: MidRunGuardTrigger | undefined;
 	abortActiveRun: boolean;
 	continueAfterComplete: boolean;
+	deferToNativeCompaction?: boolean;
 	sendContinuation: (prompt: string) => void;
 	onContinuationFailed?: (eventId: string) => void;
 	resumeStartTimeoutMs?: number;
 	compactionProofTimeoutMs?: number;
+	resumeOwner?: ContinuationResumeOwner;
+	sameRunCompaction?: boolean;
 }
 
 export interface StartAdoptedNativeCompactionOptions {
@@ -66,6 +72,8 @@ export interface StartAdoptedNativeCompactionOptions {
 	onContinuationFailed?: (eventId: string) => void;
 	resumeStartTimeoutMs?: number;
 	compactionProofTimeoutMs?: number;
+	resumeOwner?: ContinuationResumeOwner;
+	sameRunCompaction?: boolean;
 }
 
 export interface ContinuationResumeSettlement {
@@ -113,9 +121,12 @@ export function createContinuationRuntimeState(): ContinuationRuntimeState {
 	return {
 		compactionRunning: false,
 		guardFailureKey: undefined,
+		controlledMidRunAbortRequested: false,
 		awaitingResumeEventId: undefined,
 		awaitingResumeStart: undefined,
 		resumeStartTimeout: undefined,
+		externalResumeTimeout: undefined,
+		resumeDispatchTimer: undefined,
 		compactionProofTimeout: undefined,
 		pendingResumeDispatch: undefined,
 		latestLedger: undefined,
@@ -136,12 +147,6 @@ export function getLatestContinuationLedger(runtime: ContinuationRuntimeState): 
 	return runtime.latestLedger;
 }
 
-const CONTROLLED_MID_RUN_ABORT_MARKER = Symbol("pi-continue-controlled-mid-run-abort");
-
-function hasControlledMidRunAbortMarker(message: AssistantMessage): boolean {
-	return (message as AssistantMessage & Record<symbol, unknown>)[CONTROLLED_MID_RUN_ABORT_MARKER] === true;
-}
-
 export function normalizeMidRunGuardAbortMessage(
 	runtime: ContinuationRuntimeState,
 	message: AssistantMessage,
@@ -149,32 +154,23 @@ export function normalizeMidRunGuardAbortMessage(
 	const activeEvent = runtime.latestEvent;
 	if (
 		!runtime.compactionRunning
+		|| !runtime.controlledMidRunAbortRequested
 		|| activeEvent?.source !== "mid-run-guard"
 		|| !isActiveRunningContinuationEvent(runtime, activeEvent.id)
-		|| message.stopReason !== "error"
-		|| typeof message.errorMessage !== "string"
-		|| !message.errorMessage.toLowerCase().includes("abort")
+		|| (message.stopReason !== "error" && message.stopReason !== "aborted")
+		|| (message.stopReason === "error"
+			&& (typeof message.errorMessage !== "string" || !message.errorMessage.toLowerCase().includes("abort")))
 	) {
 		return message;
 	}
 	// 当前运行已由自动 handoff 接管；先中性收束旧 turn，避免 Pi 将内部控制流渲染成用户可见失败。
-	const normalized = {
+	runtime.controlledMidRunAbortRequested = false;
+	return {
 		...message,
 		content: [],
 		stopReason: "stop",
 		errorMessage: undefined,
-	} as AssistantMessage & Record<symbol, unknown>;
-	normalized[CONTROLLED_MID_RUN_ABORT_MARKER] = true;
-	return normalized;
-}
-
-/** 在 UI 完成中性收束后恢复 host 的中止语义，避免 Pi 再发起一次原生压缩。 */
-export function restoreControlledMidRunGuardAbortMessage(message: AssistantMessage): boolean {
-	if (!hasControlledMidRunAbortMarker(message)) return false;
-	message.stopReason = "aborted";
-	message.errorMessage = undefined;
-	delete (message as AssistantMessage & Record<symbol, unknown>)[CONTROLLED_MID_RUN_ABORT_MARKER];
-	return true;
+	};
 }
 
 /** 只在助手正常结束后开放一次紧邻的阈值压缩资格。 */
@@ -189,6 +185,29 @@ export function recordNativeCompactionAdoptionCheckpoint(
 
 export function clearNativeCompactionAdoptionCheckpoint(runtime: ContinuationRuntimeState): void {
 	runtime.nativeCompactionAdoptionCheckpoint = undefined;
+}
+
+/** 将宿主已保存的、带有匹配 proof 的压缩交给单一 resume 闭环。 */
+export function completeContinuationCompactionFromHost(
+	ctx: ExtensionContext,
+	runtime: ContinuationRuntimeState,
+	eventId: string,
+): boolean {
+	const pending = runtime.pendingResumeDispatch;
+	if (
+		!pending
+		|| pending.eventId !== eventId
+		|| runtime.latestEvent?.compactionProof.status !== "verified"
+		|| !isActiveRunningContinuationEvent(runtime, eventId)
+	) {
+		return false;
+	}
+	runtime.compactionRunning = false;
+	runtime.controlledMidRunAbortRequested = false;
+	runtime.guardFailureKey = undefined;
+	return pending.hostCompaction
+		? markContinuationCompactionCompleteFromHost(ctx, runtime, eventId)
+		: markContinuationCompactionComplete(ctx, runtime, eventId);
 }
 
 export function consumeNativeCompactionAdoptionCheckpoint(
@@ -319,13 +338,36 @@ export function startAdoptedNativeCompaction(
 		resumeStartTimeoutMs: options.resumeStartTimeoutMs ?? RESUME_START_TIMEOUT_MS,
 		compactionProofTimeoutMs: options.compactionProofTimeoutMs ?? RESUME_START_TIMEOUT_MS,
 		failureGuardKey: undefined,
+		resumeOwner: options.resumeOwner,
+		hostCompaction: true,
+		sameRunCompaction: options.sameRunCompaction,
 	});
 	beginWorkingVisuals(ctx, runtime, event.id, "pi-continue adopting Pi threshold compaction");
 	notify(ctx, `${label}: synthesizing handoff.`, "info");
 	return event.id;
 }
 
-/** 释放采用所有权，让同一次 Pi 事件继续使用原生摘要器。 */
+/** 释放当前 handoff，让同一次 Pi 事件继续使用原生摘要器。 */
+export function releaseContinuationToNativeFallback(
+	ctx: ExtensionContext,
+	runtime: ContinuationRuntimeState,
+	eventId: string,
+	reason: string,
+	onContinuationFailed?: (eventId: string) => void,
+): boolean {
+	if (!isActiveRunningContinuationEvent(runtime, eventId)) return false;
+	onContinuationFailed?.(eventId);
+	finishContinuationEvent(runtime, eventId, "failed", reason);
+	clearPendingResumeDispatch(runtime);
+	clearResumeStartTimeout(runtime);
+	runtime.awaitingResumeEventId = undefined;
+	runtime.compactionRunning = false;
+	runtime.controlledMidRunAbortRequested = false;
+	runtime.guardFailureKey = undefined;
+	settleWorkingVisuals(ctx, runtime, eventId);
+	return true;
+}
+
 export function releaseAdoptedNativeCompaction(
 	ctx: ExtensionContext,
 	runtime: ContinuationRuntimeState,
@@ -377,6 +419,7 @@ export function startContinuationCompaction(
 		return false;
 	}
 	runtime.compactionRunning = true;
+	runtime.controlledMidRunAbortRequested = false;
 	const event = beginContinuationEvent(
 		runtime,
 		options.source,
@@ -391,6 +434,10 @@ export function startContinuationCompaction(
 		options.instructions,
 		options.trigger ? buildGuardInstructions(options.trigger) : undefined,
 	]);
+	const delegatedToNativeCompaction = options.deferToNativeCompaction
+		&& options.continueAfterComplete
+		&& options.abortActiveRun
+		&& !ctx.isIdle();
 	let compactionCallbackSettled = false;
 	function claimCompactionCallback(): boolean {
 		if (compactionCallbackSettled) return false;
@@ -406,10 +453,14 @@ export function startContinuationCompaction(
 			resumeStartTimeoutMs: options.resumeStartTimeoutMs ?? RESUME_START_TIMEOUT_MS,
 			compactionProofTimeoutMs: options.compactionProofTimeoutMs ?? RESUME_START_TIMEOUT_MS,
 			failureGuardKey: guardKey,
+			resumeOwner: options.resumeOwner,
+			hostCompaction: true,
+			sameRunCompaction: options.sameRunCompaction,
 		});
 	}
 	function completeCompaction(): void {
 		runtime.compactionRunning = false;
+		runtime.controlledMidRunAbortRequested = false;
 		runtime.guardFailureKey = undefined;
 		if (options.continueAfterComplete) {
 			markContinuationCompactionComplete(ctx, runtime, event.id);
@@ -421,6 +472,7 @@ export function startContinuationCompaction(
 	}
 	function failCompaction(reason: string): void {
 		runtime.compactionRunning = false;
+		runtime.controlledMidRunAbortRequested = false;
 		if (guardKey) runtime.guardFailureKey = guardKey;
 		options.onContinuationFailed?.(event.id);
 		finishContinuationEvent(runtime, event.id, "failed", reason);
@@ -431,6 +483,14 @@ export function startContinuationCompaction(
 		notify(ctx, `${label}: handoff failed: ${reason}`, "error");
 	}
 	try {
+		if (delegatedToNativeCompaction) {
+			runtime.controlledMidRunAbortRequested = true;
+			ctx.abort();
+			return true;
+		}
+		if (options.source === "mid-run-guard" && options.abortActiveRun) {
+			runtime.controlledMidRunAbortRequested = true;
+		}
 		ctx.compact({
 			customInstructions,
 			onComplete: () => {

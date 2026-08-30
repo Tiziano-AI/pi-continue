@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import {
 	CONTINUATION_PROMPT,
 	acceptContinuationCompactionProof,
+	markContinuationCompactionRunMode,
+	observeCooperativeContinuationPrompt,
+	observeCooperativeContinuationTurn,
 	createContinuationRuntimeState,
 	markAwaitingContinuationResumeStarted,
 	settleAwaitingContinuationResumeFromAssistant,
@@ -41,17 +44,23 @@ function bindContext(owner) {
 	return owner.ctx;
 }
 
-function completeAndVerify(owner, ctx, runtime, eventId = "continue-1", compactionId = "compact-1") {
-	owner.compactOptions.onComplete({});
-	acceptContinuationCompactionProof(ctx, runtime, eventId, compactionId);
+async function flushResumeDispatch(): Promise<void> {
+	await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
-function verifyThenComplete(owner, ctx, runtime, eventId = "continue-1", compactionId = "compact-1") {
-	acceptContinuationCompactionProof(ctx, runtime, eventId, compactionId);
+async function completeAndVerify(owner, ctx, runtime, eventId = "continue-1", compactionId = "compact-1") {
 	owner.compactOptions.onComplete({});
+	acceptContinuationCompactionProof(ctx, runtime, eventId, compactionId);
+	await flushResumeDispatch();
 }
 
-test("startContinuationCompaction sends resume only after owned compaction proof", () => {
+async function verifyThenComplete(owner, ctx, runtime, eventId = "continue-1", compactionId = "compact-1") {
+	acceptContinuationCompactionProof(ctx, runtime, eventId, compactionId);
+	owner.compactOptions.onComplete({});
+	await flushResumeDispatch();
+}
+
+test("startContinuationCompaction sends resume only after owned compaction proof", async () => {
 	const owner = createContext(false);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -79,6 +88,7 @@ test("startContinuationCompaction sends resume only after owned compaction proof
 	assert.equal(runtime.latestEvent?.resume.status, "not-requested");
 	assert.deepEqual(continuations, []);
 	acceptContinuationCompactionProof(ctx, runtime, "continue-1", "compact-1");
+	await flushResumeDispatch();
 	assert.equal(runtime.latestEvent?.compactionProof.status, "verified");
 	assert.equal(runtime.latestEvent?.promptStatus, "sent");
 	assert.equal(runtime.latestEvent?.resume.status, "pending");
@@ -96,6 +106,79 @@ test("startContinuationCompaction sends resume only after owned compaction proof
 	assert.equal(runtime.latestEvent?.status, "completed");
 	assert.equal(runtime.latestEvent?.resume.status, "completed");
 	assert.equal(runtime.activeEventId, undefined);
+});
+
+test("cooperative workflow owns the resume prompt after pi-continue proof", async () => {
+	const owner = createContext(true);
+	const ctx = bindContext(owner);
+	const runtime = createContinuationRuntimeState();
+	const continuations = [];
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "command-steer",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: false,
+		continueAfterComplete: true,
+		resumeOwner: "cooperative-workflow",
+		sendContinuation: (prompt) => continuations.push(prompt),
+	});
+	assert.equal(started, true);
+	owner.compactOptions.onComplete({});
+	acceptContinuationCompactionProof(ctx, runtime, "continue-1", "compact-1");
+	assert.deepEqual(continuations, []);
+	assert.equal(runtime.pendingResumeDispatch?.resumeOwner, "cooperative-workflow");
+	assert.equal(observeCooperativeContinuationPrompt(ctx, runtime, "continue-1"), true);
+	await flushResumeDispatch();
+	assert.deepEqual(continuations, []);
+	assert.equal(runtime.awaitingResumeEventId, "continue-1");
+	assert.equal(markAwaitingContinuationResumeStarted(runtime), "continue-1");
+	settleAwaitingContinuationResumeFromAssistant(runtime, {
+		role: "assistant",
+		provider: "openai",
+		model: "gpt-test",
+		content: [{ type: "text", text: "goal progress" }],
+		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		stopReason: "stop",
+		timestamp: 0,
+	});
+	assert.equal(runtime.latestEvent?.status, "completed");
+});
+
+test("same-run cooperative compaction accepts the resumed host turn without a duplicate prompt", async () => {
+	const owner = createContext(false);
+	const ctx = bindContext(owner);
+	const runtime = createContinuationRuntimeState();
+	const continuations = [];
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "command-steer",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: false,
+		continueAfterComplete: true,
+		resumeOwner: "cooperative-workflow",
+		resumeStartTimeoutMs: 0,
+		sendContinuation: (prompt) => continuations.push(prompt),
+	});
+	assert.equal(started, true);
+	markContinuationCompactionRunMode(runtime, "continue-1", true);
+	owner.compactOptions.onComplete({});
+	acceptContinuationCompactionProof(ctx, runtime, "continue-1", "compact-1");
+	assert.equal(observeCooperativeContinuationTurn(ctx, runtime, "continue-1"), true);
+	assert.deepEqual(continuations, []);
+	assert.equal(runtime.pendingResumeDispatch, undefined);
+	assert.equal(runtime.awaitingResumeEventId, "continue-1");
+	assert.equal(runtime.latestEvent?.resume.status, "running");
+	settleAwaitingContinuationResumeFromAssistant(runtime, {
+		role: "assistant",
+		provider: "openai",
+		model: "gpt-test",
+		content: [{ type: "text", text: "goal progress" }],
+		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		stopReason: "stop",
+		timestamp: 0,
+	});
+	assert.equal(runtime.latestEvent?.status, "completed");
+	assert.equal(runtime.latestEvent?.resume.status, "completed");
 });
 
 test("continuation leaves active-run cancellation to ctx.compact", () => {
@@ -122,7 +205,7 @@ test("continuation leaves active-run cancellation to ctx.compact", () => {
 	assert.equal(runtime.compactionRunning, true);
 });
 
-test("synchronous resume start proof survives verified dispatch ordering", () => {
+test("synchronous resume start proof survives verified dispatch ordering", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -139,7 +222,7 @@ test("synchronous resume start proof survives verified dispatch ordering", () =>
 		},
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
 	assert.equal(runtime.latestEvent?.compactionProof.status, "verified");
 	assert.equal(runtime.latestEvent?.promptStatus, "sent");
@@ -147,7 +230,7 @@ test("synchronous resume start proof survives verified dispatch ordering", () =>
 	assert.equal(runtime.awaitingResumeEventId, "continue-1");
 });
 
-test("owned proof before compaction completion waits for completion before resume", () => {
+test("owned proof before compaction completion waits for completion before resume", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -161,12 +244,12 @@ test("owned proof before compaction completion waits for completion before resum
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(started, true);
-	verifyThenComplete(owner, ctx, runtime);
+	await verifyThenComplete(owner, ctx, runtime);
 	assert.equal(runtime.latestEvent?.compactionProof.status, "verified");
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
 });
 
-test("verified proof survives a delayed Already compacted callback", () => {
+test("verified proof survives a delayed Already compacted callback", async () => {
 	const owner = createContext(false);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -187,6 +270,9 @@ test("verified proof survives a delayed Already compacted callback", () => {
 	assert.equal(runtime.latestEvent?.status, "running");
 	assert.equal(runtime.latestEvent?.failureReason, undefined);
 	assert.equal(runtime.latestEvent?.compactionProof.status, "verified");
+	assert.equal(runtime.latestEvent?.resume.status, "not-requested");
+	assert.deepEqual(continuations, []);
+	await flushResumeDispatch();
 	assert.equal(runtime.latestEvent?.resume.status, "pending");
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
 	owner.compactOptions.onError(new Error("Already compacted"));

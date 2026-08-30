@@ -4,6 +4,7 @@ import {
 	decideMidRunGuardTrigger,
 	decideNativeCompactionAdoption,
 	hasNativeCompactionPreparation,
+	shouldDelegateMidRunCompactionToNative,
 	shouldEvaluateMidRunContext,
 } from "../extensions/continue/src/mid-run-guard.ts";
 
@@ -184,6 +185,49 @@ test("decideMidRunGuardTrigger only trips above the reserve threshold", () => {
 		trailingTokens: 11,
 		lastUsageIndex: 3,
 	});
+});
+
+test("mid-run delegation only uses the host native threshold boundary", () => {
+	assert.equal(shouldDelegateMidRunCompactionToNative({
+		mode: "reserve-tokens",
+		estimatedTokens: 81,
+		thresholdTokens: 80,
+		contextWindow: 100,
+		reserveTokens: 20,
+		usageTokens: 81,
+		trailingTokens: 0,
+		lastUsageIndex: 3,
+	}, { enabled: true, reserveTokens: 20, keepRecentTokens: 10 }), true);
+	assert.equal(shouldDelegateMidRunCompactionToNative({
+		mode: "percentage",
+		percentage: 80,
+		estimatedTokens: 80,
+		thresholdTokens: 80,
+		contextWindow: 100,
+		usageTokens: 80,
+		trailingTokens: 0,
+		lastUsageIndex: 3,
+	}, { enabled: true, reserveTokens: 20, keepRecentTokens: 10 }), false);
+	assert.equal(shouldDelegateMidRunCompactionToNative({
+		mode: "percentage",
+		percentage: 80,
+		estimatedTokens: 81,
+		thresholdTokens: 80,
+		contextWindow: 100,
+		usageTokens: 81,
+		trailingTokens: 0,
+		lastUsageIndex: 3,
+	}, { enabled: true, reserveTokens: 20, keepRecentTokens: 10 }), true);
+	assert.equal(shouldDelegateMidRunCompactionToNative({
+		mode: "percentage",
+		percentage: 70,
+		estimatedTokens: 70,
+		thresholdTokens: 70,
+		contextWindow: 100,
+		usageTokens: 70,
+		trailingTokens: 0,
+		lastUsageIndex: 3,
+	}, { enabled: true, reserveTokens: 20, keepRecentTokens: 10 }), false);
 });
 
 test("decideMidRunGuardTrigger recomputes percentage thresholds for the current model", () => {

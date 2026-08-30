@@ -7,8 +7,9 @@ import {
 	markContinuationCompactionProofVerified,
 	markContinuationPromptSent,
 	markContinuationResumePending,
+	markContinuationResumeStarted,
 } from "./continuation-event.ts";
-import type { ContinuationEventStore } from "./types.ts";
+import type { ContinuationEventStore, ContinuationResumeOwner } from "./types.ts";
 import { settleWorkingVisuals, updateWorkingVisuals } from "./working-ui.ts";
 
 export const PROMPT_DISPATCH_FAILURE = "Continuation resume request failed.";
@@ -28,6 +29,12 @@ export interface PendingResumeDispatch {
 	failureGuardKey: string | undefined;
 	compactionCompleted: boolean;
 	proofVerified: boolean;
+	/** 当宿主而非 ctx.compact() 掌握压缩完成边界时为真。 */
+	hostCompaction: boolean;
+	resumeOwner: ContinuationResumeOwner;
+	externalPromptObserved: boolean;
+	/** 当压缩发生在仍在运行的宿主回合中时为真。 */
+	sameRunCompaction: boolean;
 }
 
 export interface AwaitingResumeStart {
@@ -35,6 +42,7 @@ export interface AwaitingResumeStart {
 	label: string;
 	onContinuationFailed: ((eventId: string) => void) | undefined;
 	resumeStartTimeoutMs: number;
+	resumeOwner: ContinuationResumeOwner;
 }
 
 export interface ResumeProofRuntimeState extends ContinuationEventStore {
@@ -44,6 +52,8 @@ export interface ResumeProofRuntimeState extends ContinuationEventStore {
 	awaitingResumeStart: AwaitingResumeStart | undefined;
 	resumeStartTimeout: ReturnType<typeof setTimeout> | undefined;
 	compactionProofTimeout: ReturnType<typeof setTimeout> | undefined;
+	externalResumeTimeout: ReturnType<typeof setTimeout> | undefined;
+	resumeDispatchTimer: ReturnType<typeof setTimeout> | undefined;
 	pendingResumeDispatch: PendingResumeDispatch | undefined;
 }
 
@@ -55,6 +65,9 @@ export interface PendingResumeDispatchOptions {
 	resumeStartTimeoutMs: number;
 	compactionProofTimeoutMs: number;
 	failureGuardKey: string | undefined;
+	resumeOwner?: ContinuationResumeOwner;
+	hostCompaction?: boolean;
+	sameRunCompaction?: boolean;
 }
 
 export function notify(ctx: ExtensionContext, message: string, type: "info" | "warning" | "error"): void {
@@ -83,9 +96,35 @@ export function clearCompactionProofTimeout(runtime: ResumeProofRuntimeState): v
 	runtime.compactionProofTimeout = undefined;
 }
 
+function clearExternalResumeTimeout(runtime: ResumeProofRuntimeState): void {
+	if (!runtime.externalResumeTimeout) return;
+	clearTimeout(runtime.externalResumeTimeout);
+	runtime.externalResumeTimeout = undefined;
+}
+
+function clearResumeDispatchTimer(runtime: ResumeProofRuntimeState): void {
+	if (!runtime.resumeDispatchTimer) return;
+	clearTimeout(runtime.resumeDispatchTimer);
+	runtime.resumeDispatchTimer = undefined;
+}
+
+/** 在宿主已接受扩展压缩结果后等待对应的 session_compact proof。 */
+export function armContinuationCompactionProofTimeout(
+	ctx: ExtensionContext,
+	runtime: ResumeProofRuntimeState,
+	eventId: string,
+): boolean {
+	const pending = runtime.pendingResumeDispatch;
+	if (!pending || pending.eventId !== eventId || pending.proofVerified) return false;
+	scheduleCompactionProofTimeout(ctx, runtime, pending);
+	return true;
+}
+
 export function clearPendingResumeDispatch(runtime: ResumeProofRuntimeState): void {
 	runtime.pendingResumeDispatch = undefined;
 	clearCompactionProofTimeout(runtime);
+	clearExternalResumeTimeout(runtime);
+	clearResumeDispatchTimer(runtime);
 }
 
 export function preparePendingResumeDispatch(runtime: ResumeProofRuntimeState, options: PendingResumeDispatchOptions): void {
@@ -99,7 +138,36 @@ export function preparePendingResumeDispatch(runtime: ResumeProofRuntimeState, o
 		failureGuardKey: options.failureGuardKey,
 		compactionCompleted: false,
 		proofVerified: false,
+		hostCompaction: options.hostCompaction ?? false,
+		resumeOwner: options.resumeOwner ?? "pi-continue",
+		externalPromptObserved: false,
+		sameRunCompaction: options.sameRunCompaction ?? false,
 	};
+}
+
+/** 锁定 handoff 的恢复责任，避免 Goal 已接管后又被降级为扩展自发 prompt。 */
+export function setContinuationResumeOwner(
+	runtime: ResumeProofRuntimeState,
+	eventId: string,
+	owner: ContinuationResumeOwner,
+): boolean {
+	const pending = runtime.pendingResumeDispatch;
+	if (!pending || pending.eventId !== eventId) return false;
+	if (pending.resumeOwner === "cooperative-workflow" && owner === "pi-continue") return true;
+	pending.resumeOwner = owner;
+	return true;
+}
+
+/** 记录宿主是否会在同一运行中继续请求模型，避免把合法续行误判为缺少 Goal 提示。 */
+export function markContinuationCompactionRunMode(
+	runtime: ResumeProofRuntimeState,
+	eventId: string,
+	runActive: boolean,
+): boolean {
+	const pending = runtime.pendingResumeDispatch;
+	if (!pending || pending.eventId !== eventId || !pending.hostCompaction) return false;
+	if (runActive) pending.sameRunCompaction = true;
+	return true;
 }
 
 function scheduleResumeStartTimeout(ctx: ExtensionContext, runtime: ResumeProofRuntimeState, resumeStart: AwaitingResumeStart): void {
@@ -127,6 +195,22 @@ function scheduleCompactionProofTimeout(ctx: ExtensionContext, runtime: ResumePr
 	unrefTimer(timeout);
 }
 
+function scheduleExternalResumeTimeout(ctx: ExtensionContext, runtime: ResumeProofRuntimeState, pending: PendingResumeDispatch): void {
+	clearExternalResumeTimeout(runtime);
+	const timeout = setTimeout(() => {
+		const current = runtime.pendingResumeDispatch;
+		if (
+			!current
+			|| current.eventId !== pending.eventId
+			|| current.resumeOwner !== "cooperative-workflow"
+			|| current.externalPromptObserved
+		) return;
+		failContinuationCompactionProof(ctx, runtime, pending.eventId, "The cooperative workflow did not submit its continuation request.");
+	}, Math.max(0, pending.resumeStartTimeoutMs));
+	runtime.externalResumeTimeout = timeout;
+	unrefTimer(timeout);
+}
+
 function failContinuationResumeStart(runtime: ResumeProofRuntimeState, eventId: string, reason: string): boolean {
 	if (!finishContinuationEvent(runtime, eventId, "failed", reason)) return false;
 	clearResumeStartTimeout(runtime);
@@ -149,10 +233,72 @@ export function armDeferredResumeStartTimeout(ctx: ExtensionContext, runtime: Re
 	return true;
 }
 
-function dispatchIfReady(ctx: ExtensionContext, runtime: ResumeProofRuntimeState, eventId: string): boolean {
+function dispatchCooperativeResumeIfObserved(
+	ctx: ExtensionContext,
+	runtime: ResumeProofRuntimeState,
+	pending: PendingResumeDispatch,
+	startedInCurrentRun = false,
+): boolean {
+	if (!pending.externalPromptObserved) {
+		scheduleExternalResumeTimeout(ctx, runtime, pending);
+		return false;
+	}
+	clearExternalResumeTimeout(runtime);
+	clearCompactionProofTimeout(runtime);
+	runtime.pendingResumeDispatch = undefined;
+	updateWorkingVisuals(ctx, runtime, pending.eventId, "pi-continue resuming this session");
+	markContinuationResumePending(runtime, pending.eventId);
+	runtime.awaitingResumeEventId = pending.eventId;
+	const resumeStart: AwaitingResumeStart = {
+		eventId: pending.eventId,
+		label: pending.label,
+		onContinuationFailed: pending.onContinuationFailed,
+		resumeStartTimeoutMs: pending.resumeStartTimeoutMs,
+		resumeOwner: "cooperative-workflow",
+	};
+	runtime.awaitingResumeStart = resumeStart;
+	markContinuationPromptSent(runtime, pending.eventId);
+	if (startedInCurrentRun) {
+		markContinuationResumeStarted(runtime, pending.eventId);
+		return true;
+	}
+	if (ctx.isIdle() && isAwaitingResumeStartPending(runtime, pending.eventId)) {
+		scheduleResumeStartTimeout(ctx, runtime, resumeStart);
+	}
+	return true;
+}
+
+function scheduleResumeDispatchAfterHost(ctx: ExtensionContext, runtime: ResumeProofRuntimeState, eventId: string): void {
+	if (runtime.resumeDispatchTimer) return;
+	const timer = setTimeout(() => {
+		runtime.resumeDispatchTimer = undefined;
+		dispatchIfReady(ctx, runtime, eventId);
+	}, 0);
+	runtime.resumeDispatchTimer = timer;
+	unrefTimer(timer);
+}
+
+function queueResumeDispatch(ctx: ExtensionContext, runtime: ResumeProofRuntimeState, eventId: string): boolean {
+	const pending = runtime.pendingResumeDispatch;
+	if (!pending || pending.eventId !== eventId || !pending.compactionCompleted || !pending.proofVerified) return false;
+	if (pending.hostCompaction && !pending.sameRunCompaction) {
+		clearCompactionProofTimeout(runtime);
+		scheduleResumeDispatchAfterHost(ctx, runtime, eventId);
+		return true;
+	}
+	return dispatchIfReady(ctx, runtime, eventId, pending.sameRunCompaction);
+}
+
+function dispatchIfReady(
+	ctx: ExtensionContext,
+	runtime: ResumeProofRuntimeState,
+	eventId: string,
+	startedInCurrentRun = false,
+): boolean {
 	const pending = runtime.pendingResumeDispatch;
 	if (!pending || pending.eventId !== eventId || !pending.compactionCompleted || !pending.proofVerified) return false;
 	if (!isActiveRunningContinuationEvent(runtime, eventId)) return false;
+	if (pending.resumeOwner === "cooperative-workflow") return dispatchCooperativeResumeIfObserved(ctx, runtime, pending, startedInCurrentRun);
 	clearCompactionProofTimeout(runtime);
 	runtime.pendingResumeDispatch = undefined;
 	updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resuming this session");
@@ -163,6 +309,7 @@ function dispatchIfReady(ctx: ExtensionContext, runtime: ResumeProofRuntimeState
 		label: pending.label,
 		onContinuationFailed: pending.onContinuationFailed,
 		resumeStartTimeoutMs: pending.resumeStartTimeoutMs,
+		resumeOwner: "pi-continue",
 	};
 	runtime.awaitingResumeStart = resumeStart;
 	try {
@@ -188,14 +335,69 @@ function dispatchIfReady(ctx: ExtensionContext, runtime: ResumeProofRuntimeState
 	return true;
 }
 
+/** 接受 Goal 已经排队的同会话 continuation，扩展只负责把它纳入自己的 proof 闭环。 */
+export function observeCooperativeContinuationPrompt(
+	ctx: ExtensionContext,
+	runtime: ResumeProofRuntimeState,
+	eventId: string,
+): boolean {
+	const pending = runtime.pendingResumeDispatch;
+	if (!pending || pending.eventId !== eventId || pending.resumeOwner !== "cooperative-workflow") return false;
+	if (!isActiveRunningContinuationEvent(runtime, eventId)) return false;
+	pending.externalPromptObserved = true;
+	if (!pending.compactionCompleted || !pending.proofVerified) return true;
+	queueResumeDispatch(ctx, runtime, eventId);
+	return true;
+}
+
+/** 识别宿主压缩后的同回合续行；此路径不应等待 Goal 再提交一条重复提示。 */
+export function observeCooperativeContinuationTurn(
+	ctx: ExtensionContext,
+	runtime: ResumeProofRuntimeState,
+	eventId: string,
+): boolean {
+	const pending = runtime.pendingResumeDispatch;
+	if (
+		!pending
+		|| pending.eventId !== eventId
+		|| pending.resumeOwner !== "cooperative-workflow"
+		|| !pending.sameRunCompaction
+		|| pending.externalPromptObserved
+		|| runtime.awaitingResumeEventId === eventId
+		|| ctx.isIdle()
+	) return false;
+	if (!isActiveRunningContinuationEvent(runtime, eventId)) return false;
+	pending.externalPromptObserved = true;
+	if (!pending.compactionCompleted || !pending.proofVerified) return true;
+	clearResumeDispatchTimer(runtime);
+	dispatchIfReady(ctx, runtime, eventId, true);
+	return true;
+}
+
 export function markContinuationCompactionComplete(ctx: ExtensionContext, runtime: ResumeProofRuntimeState, eventId: string): boolean {
 	const pending = runtime.pendingResumeDispatch;
 	if (!pending || pending.eventId !== eventId) return false;
+	if (pending.compactionCompleted) return pending.proofVerified
+		? queueResumeDispatch(ctx, runtime, eventId)
+		: true;
 	pending.compactionCompleted = true;
-	if (pending.proofVerified) return dispatchIfReady(ctx, runtime, eventId);
+	if (pending.proofVerified) return queueResumeDispatch(ctx, runtime, eventId);
 	updateWorkingVisuals(ctx, runtime, eventId, "pi-continue verifying saved handoff");
 	scheduleCompactionProofTimeout(ctx, runtime, pending);
 	return true;
+}
+
+/**
+ * 由宿主 session_compact 事件确认保存完成；延迟一个任务再投递，避开手动压缩控制器尚未清理的窗口。
+ */
+export function markContinuationCompactionCompleteFromHost(
+	ctx: ExtensionContext,
+	runtime: ResumeProofRuntimeState,
+	eventId: string,
+): boolean {
+	const pending = runtime.pendingResumeDispatch;
+	if (!pending || pending.eventId !== eventId || !pending.hostCompaction) return false;
+	return markContinuationCompactionComplete(ctx, runtime, eventId);
 }
 
 export function verifyContinuationCompactionProof(ctx: ExtensionContext, runtime: ResumeProofRuntimeState, eventId: string, compactionEntryId: string): boolean {
@@ -211,7 +413,7 @@ export function verifyContinuationCompactionProof(ctx: ExtensionContext, runtime
 }
 
 export function dispatchVerifiedContinuationResume(ctx: ExtensionContext, runtime: ResumeProofRuntimeState, eventId: string): boolean {
-	return dispatchIfReady(ctx, runtime, eventId);
+	return queueResumeDispatch(ctx, runtime, eventId);
 }
 
 export function acceptContinuationCompactionProof(ctx: ExtensionContext, runtime: ResumeProofRuntimeState, eventId: string, compactionEntryId: string): boolean {

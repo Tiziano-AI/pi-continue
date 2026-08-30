@@ -4,6 +4,7 @@ import { markActiveContinuationArtifact, recordActiveSynthesisFailure } from "..
 import {
 	CONTINUATION_PROMPT,
 	acceptContinuationCompactionProof,
+	completeContinuationCompactionFromHost,
 	armDeferredResumeStartTimeout,
 	consumeNativeCompactionAdoptionCheckpoint,
 	createContinuationRuntimeState,
@@ -13,7 +14,6 @@ import {
 	parseContinuationRequest,
 	recordNativeCompactionAdoptionCheckpoint,
 	releaseAdoptedNativeCompaction,
-	restoreControlledMidRunGuardAbortMessage,
 	runContinuationCommand,
 	settleAwaitingContinuationResumeFromAssistant,
 	startAdoptedNativeCompaction,
@@ -67,9 +67,14 @@ const trigger = {
 	lastUsageIndex: 3,
 };
 
-function completeAndVerify(owner, ctx, runtime, eventId = "continue-1", compactionId = "compact-1") {
+async function flushResumeDispatch(): Promise<void> {
+	await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
+async function completeAndVerify(owner, ctx, runtime, eventId = "continue-1", compactionId = "compact-1") {
 	owner.compactOptions.onComplete({});
 	acceptContinuationCompactionProof(ctx, runtime, eventId, compactionId);
+	await flushResumeDispatch();
 }
 
 test("receiver prompt frames the agent as its own amnesiac continuer with a factual authority boundary", () => {
@@ -157,9 +162,7 @@ test("mid-run guard abort normalization is scoped to active ownership", () => {
 	assert.equal(normalized.stopReason, "stop");
 	assert.deepEqual(normalized.content, []);
 	assert.equal(normalized.errorMessage, undefined);
-	assert.equal(restoreControlledMidRunGuardAbortMessage(normalized), true);
-	assert.equal(normalized.stopReason, "aborted");
-	assert.equal(restoreControlledMidRunGuardAbortMessage(normalized), false);
+	assert.equal(normalizeMidRunGuardAbortMessage(successRuntime, abortError), abortError);
 	successOwner.compactOptions.onComplete({});
 	assert.equal(normalizeMidRunGuardAbortMessage(successRuntime, abortError), abortError);
 
@@ -176,6 +179,33 @@ test("mid-run guard abort normalization is scoped to active ownership", () => {
 	});
 	failureOwner.compactOptions.onError(new Error("failed"));
 	assert.equal(normalizeMidRunGuardAbortMessage(failureRuntime, abortError), abortError);
+});
+
+test("mid-run native delegation aborts once and resumes after the host proof", async () => {
+	const owner = createContext(false);
+	const ctx = bindContext(owner);
+	const runtime = createContinuationRuntimeState();
+	const continuations = [];
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "mid-run-guard",
+		instructions: undefined,
+		trigger,
+		abortActiveRun: true,
+		continueAfterComplete: true,
+		deferToNativeCompaction: true,
+		sendContinuation: (prompt) => continuations.push(prompt),
+	});
+	assert.equal(started, true);
+	assert.equal(owner.aborts, 1);
+	assert.equal(owner.compactOptions, undefined);
+	assert.equal(runtime.compactionRunning, true);
+	assert.equal(runtime.controlledMidRunAbortRequested, true);
+	assert.equal(completeContinuationCompactionFromHost(ctx, runtime, "continue-1"), false);
+	assert.equal(acceptContinuationCompactionProof(ctx, runtime, "continue-1", "compact-1"), true);
+	assert.equal(completeContinuationCompactionFromHost(ctx, runtime, "continue-1"), true);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
+	assert.equal(runtime.compactionRunning, false);
 });
 
 test("adopted native compaction owns lifecycle without invoking compact or abort", () => {
@@ -203,7 +233,7 @@ test("adopted native compaction owns lifecycle without invoking compact or abort
 	assert.equal(runtime.latestEvent?.failureReason, "fallback");
 });
 
-test("stale assistant message_end cannot settle resume before start proof", () => {
+test("stale assistant message_end cannot settle resume before start proof", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -217,7 +247,7 @@ test("stale assistant message_end cannot settle resume before start proof", () =
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	const stale = settleAwaitingContinuationResumeFromAssistant(runtime, {
 		role: "assistant",
 		provider: "openai",
@@ -233,7 +263,7 @@ test("stale assistant message_end cannot settle resume before start proof", () =
 	assert.equal(runtime.awaitingResumeEventId, "continue-1");
 });
 
-test("agent-end resume failure requires start proof", () => {
+test("agent-end resume failure requires start proof", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -247,7 +277,7 @@ test("agent-end resume failure requires start proof", () => {
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.equal(failRunningAwaitingContinuationResume(runtime, "Continuation resume did not produce an assistant response."), undefined);
 	assert.equal(runtime.latestEvent?.status, "running");
 	assert.equal(markAwaitingContinuationResumeStarted(runtime), "continue-1");
@@ -259,7 +289,7 @@ test("agent-end resume failure requires start proof", () => {
 	assert.equal(runtime.awaitingResumeEventId, undefined);
 });
 
-test("resume proof stays running while the resumed assistant requests tools", () => {
+test("resume proof stays running while the resumed assistant requests tools", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -273,7 +303,7 @@ test("resume proof stays running while the resumed assistant requests tools", ()
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.equal(markAwaitingContinuationResumeStarted(runtime), "continue-1");
 	const settlement = settleAwaitingContinuationResumeFromAssistant(runtime, {
 		role: "assistant",
@@ -290,7 +320,7 @@ test("resume proof stays running while the resumed assistant requests tools", ()
 	assert.equal(runtime.awaitingResumeEventId, "continue-1");
 });
 
-test("mid-run guard can chain after a resumed assistant tool-use turn", () => {
+test("mid-run guard can chain after a resumed assistant tool-use turn", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -304,7 +334,7 @@ test("mid-run guard can chain after a resumed assistant tool-use turn", () => {
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(first, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.equal(markAwaitingContinuationResumeStarted(runtime), "continue-1");
 	const toolUseSettlement = settleAwaitingContinuationResumeFromAssistant(runtime, {
 		role: "assistant",
@@ -362,7 +392,7 @@ test("mid-run guard stops over-limit request while handoff is already saving", (
 	assert.equal(continuations.length, 0);
 });
 
-test("pending resume blocks new continuation without clobbering active state", () => {
+test("pending resume blocks new continuation without clobbering active state", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -376,7 +406,7 @@ test("pending resume blocks new continuation without clobbering active state", (
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(first, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.equal(runtime.activeEventId, "continue-1");
 	assert.equal(runtime.awaitingResumeEventId, "continue-1");
 	const second = startContinuationCompaction(ctx, runtime, {
@@ -395,7 +425,7 @@ test("pending resume blocks new continuation without clobbering active state", (
 	assert.equal(continuations.length, 1);
 });
 
-test("mid-run guard stops over-limit request while preserving pending resume", () => {
+test("mid-run guard stops over-limit request while preserving pending resume", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -409,7 +439,7 @@ test("mid-run guard stops over-limit request while preserving pending resume", (
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(first, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	const guard = startContinuationCompaction(ctx, runtime, {
 		source: "mid-run-guard",
 		instructions: undefined,
@@ -427,7 +457,7 @@ test("mid-run guard stops over-limit request while preserving pending resume", (
 	assert.equal(continuations.length, 1);
 });
 
-test("duplicate compaction terminal callbacks cannot double-send or fail pending resume", () => {
+test("duplicate compaction terminal callbacks cannot double-send or fail pending resume", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -443,7 +473,7 @@ test("duplicate compaction terminal callbacks cannot double-send or fail pending
 		onContinuationFailed: (eventId) => failedEvents.push(eventId),
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	owner.compactOptions.onComplete({});
 	owner.compactOptions.onError(new Error("provider failed"));
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
@@ -471,7 +501,7 @@ test("resume start timeout settles idle prompt dispatch that never starts", asyn
 		resumeStartTimeoutMs: 0,
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
 	assert.deepEqual(failedEvents, ["continue-1"]);
@@ -499,7 +529,7 @@ test("queued follow-up resume can start after the parent turn remains active", a
 		resumeStartTimeoutMs: 0,
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
 	assert.deepEqual(failedEvents, []);
@@ -538,7 +568,7 @@ test("queued follow-up resume start timeout arms after the active parent turn en
 		resumeStartTimeoutMs: 0,
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.equal(armDeferredResumeStartTimeout(ctx, runtime), true);
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
@@ -668,7 +698,7 @@ test("failed guard records a failure key and blocks identical retries", () => {
 	assert.equal(runtime.latestEvent?.failureReason, "Repeated over-limit retry was blocked after a failed continuation.");
 });
 
-test("prompt dispatch failure settles the latest event", () => {
+test("prompt dispatch failure settles the latest event", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -683,7 +713,7 @@ test("prompt dispatch failure settles the latest event", () => {
 		},
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.equal(runtime.compactionRunning, false);
 	assert.equal(runtime.activeEventId, undefined);
 	assert.equal(runtime.latestEvent?.status, "failed");
@@ -740,6 +770,6 @@ test("runContinuationCommand queue waits for idle before compaction", async () =
 	assert.equal(owner.waits, 1);
 	assert.equal(owner.aborts, 0);
 	assert.equal(owner.compactOptions.customInstructions, "finish validation");
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
 });

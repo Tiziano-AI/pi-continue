@@ -103,6 +103,7 @@ export interface ParsedHistoryArtifacts {
 }
 
 export type ContinuationEventSource = "command-steer" | "command-queue" | "mid-run-guard" | "adopted-compaction";
+export type ContinuationResumeOwner = "pi-continue" | "cooperative-workflow";
 export type ContinuationEventStatus = "running" | "completed" | "failed" | "blocked";
 export type ContinuationArtifactStatus = "pending" | "modeled" | "aborted";
 export type ContinuationPromptStatus = "pending" | "sent" | "not-requested" | "failed";

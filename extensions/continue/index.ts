@@ -37,20 +37,22 @@ import { showContinuePalette } from "./src/palette.ts";
 import { shouldDeferNativeThresholdCompaction } from "./src/threshold.ts";
 import {
 	CONTINUATION_PROMPT,
+	armContinuationCompactionProofTimeout,
 	armDeferredResumeStartTimeout,
 	clearNativeCompactionAdoptionCheckpoint,
 	clearResumeStartTimeout,
 	consumeNativeCompactionAdoptionCheckpoint,
 	createContinuationRuntimeState,
-	dispatchVerifiedContinuationResume,
+	completeContinuationCompactionFromHost,
 	failContinuationCompactionProof,
 	failRunningAwaitingContinuationResume,
 	markAwaitingContinuationResumeStarted,
 	markContinuationCompactionComplete,
+	markContinuationCompactionRunMode,
 	normalizeMidRunGuardAbortMessage,
 	recordNativeCompactionAdoptionCheckpoint,
 	releaseAdoptedNativeCompaction,
-	restoreControlledMidRunGuardAbortMessage,
+	releaseContinuationToNativeFallback,
 	settleAwaitingContinuationResumeFromAssistant,
 	startAdoptedNativeCompaction,
 	type ContinuationRuntimeState,
@@ -59,7 +61,11 @@ import {
 import {
 	INVALID_COMPACTION_PROOF_FAILURE,
 	NATIVE_COMPACTION_FALLBACK_FAILURE,
+	STALE_COMPACTION_PROOF_FAILURE,
 	clearPendingResumeDispatch,
+	observeCooperativeContinuationPrompt,
+	observeCooperativeContinuationTurn,
+	setContinuationResumeOwner,
 } from "./src/resume-proof.ts";
 import type { AgentGuideWriteStatus, ContinuationCompactionDetails, ContinuationConfig, ContinuationSynthesisFailure, ContinuationSynthesisTelemetry, ParsedHistoryArtifacts, PendingOutputWrite, WriteMode } from "./src/types.ts";
 import {
@@ -67,6 +73,7 @@ import {
 	settleWorkingVisuals,
 	updateWorkingVisuals,
 } from "./src/working-ui.ts";
+import { isGoalContinuationPrompt, WorkflowCoordination } from "./src/workflow-coordination.ts";
 
 function decideAgentGuideWriteStatus(writeMode: WriteMode, agentGuideMd: string | undefined): AgentGuideWriteStatus {
 	if (writeMode === "off") return "write-off";
@@ -80,6 +87,38 @@ type NativeAwareSessionBeforeCompactEvent = SessionBeforeCompactEvent & {
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
 	return typeof message === "object" && message !== null && "role" in message && message.role === "assistant";
+}
+
+function isGoalContinuationUserMessage(message: unknown): boolean {
+	try {
+		return typeof message === "object"
+			&& message !== null
+			&& Reflect.get(message, "role") === "user"
+			&& isGoalContinuationPrompt(JSON.stringify(message));
+	} catch {
+		return false;
+	}
+}
+
+type OptionalExtensionEventHandler = (event: unknown, ctx: ExtensionContext) => void | Promise<void>;
+
+function registerOptionalExtensionEvent(
+	pi: ExtensionAPI,
+	eventName: string,
+	handler: OptionalExtensionEventHandler,
+): void {
+	// 低版本宿主没有该事件；通过结构化注册保留运行时兼容，而不是扩大最低版本类型契约。
+	const register = pi.on.bind(pi) as unknown as (name: string, callback: OptionalExtensionEventHandler) => void;
+	register(eventName, handler);
+}
+
+function compactionFailureReason(event: unknown): string {
+	if (typeof event === "object" && event !== null) {
+		const errorMessage = Reflect.get(event, "errorMessage");
+		if (typeof errorMessage === "string" && errorMessage.trim().length > 0) return errorMessage;
+		if (Reflect.get(event, "aborted") === true) return "Pi aborted the native continuation compaction.";
+	}
+	return "Pi failed the native continuation compaction.";
 }
 
 const OUTPUT_WRITE_FAILURE = "Output write failed; check the configured path and permissions.";
@@ -101,7 +140,8 @@ class ArtifactParseError extends Error {
 	}
 }
 
-function normalizeSynthesisFailure(error: unknown): ContinuationSynthesisFailure {	if (error instanceof PromptPassError) {
+function normalizeSynthesisFailure(error: unknown): ContinuationSynthesisFailure {
+	if (error instanceof PromptPassError) {
 		return {
 			kind: "model-provider-call",
 			code: error.code,
@@ -153,6 +193,7 @@ async function evaluateMechanicalShake(
 		ownerEventId,
 	);
 	if (adopted) markContinuationCompactionComplete(ctx, runtime, ownerEventId);
+	else armContinuationCompactionProofTimeout(ctx, runtime, ownerEventId);
 	return {
 		compaction: {
 			summary: plan.summary,
@@ -167,6 +208,7 @@ export default function (pi: ExtensionAPI) {
 	const pendingOutputWrites = new Map<string, PendingOutputWrite>();
 	const runtime = createContinuationRuntimeState();
 	const ledgerOverlay = createContinuationLedgerOverlayController();
+	const workflowCoordination = new WorkflowCoordination(pi);
 
 	function cleanupPendingOutputWrites(eventId: string): void {
 		emitContinuationLifecycle(pi, "failed", eventId);
@@ -179,7 +221,33 @@ export default function (pi: ExtensionAPI) {
 		if (removed) {
 			failPendingOutputWritesForEvent(runtime, eventId, PENDING_OUTPUT_WRITE_FAILURE);
 		}
+		workflowCoordination.releaseEvent(eventId);
 	}
+
+	function observeGoalContinuationPrompt(text: string, ctx: ExtensionContext): boolean {
+		if (!isGoalContinuationPrompt(text)) return false;
+		const eventId = getActiveContinuationEventId(runtime);
+		if (!eventId || workflowCoordination.isSelfOwner(eventId)) return false;
+		if (
+			runtime.awaitingResumeEventId === eventId
+			&& runtime.awaitingResumeStart?.resumeOwner === "cooperative-workflow"
+		) return true;
+		if (!workflowCoordination.isGoalOwner(ctx, [text])) return false;
+		if (!setContinuationResumeOwner(runtime, eventId, "cooperative-workflow")) return false;
+		return observeCooperativeContinuationPrompt(ctx, runtime, eventId);
+	}
+
+	function observeSameRunContinuation(ctx: ExtensionContext): void {
+		const eventId = getActiveContinuationEventId(runtime);
+		if (!eventId || !observeCooperativeContinuationTurn(ctx, runtime, eventId)) return;
+		if (runtime.awaitingResumeEventId === eventId && runtime.latestEvent?.resume.status === "running") {
+			updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
+		}
+	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		workflowCoordination.bindSession(ctx.sessionManager);
+	});
 
 	pi.registerCommand("continue", {
 		description: "Save a same-session handoff, resume this run, or inspect continuation settings.",
@@ -226,6 +294,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
+		if (observeGoalContinuationPrompt(event.prompt, ctx)) {
+			const eventId = markAwaitingContinuationResumeStarted(runtime);
+			if (eventId) updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
+			return;
+		}
 		if (event.prompt !== CONTINUATION_PROMPT) return;
 		const eventId = markAwaitingContinuationResumeStarted(runtime);
 		if (!eventId) return;
@@ -240,15 +313,28 @@ export default function (pi: ExtensionAPI) {
 			}
 			return;
 		}
+		if (isGoalContinuationUserMessage(event.message)) {
+			const messageText = JSON.stringify(event.message);
+			if (!observeGoalContinuationPrompt(messageText, ctx)) return;
+			const eventId = markAwaitingContinuationResumeStarted(runtime);
+			if (eventId) updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
+			return;
+		}
 		if (!isAssistantMessage(event.message)) return;
+		observeSameRunContinuation(ctx);
 		const eventId = runtime.awaitingResumeEventId;
 		if (!eventId || runtime.latestEvent?.id !== eventId || runtime.latestEvent.resume.status !== "running") return;
 		updateWorkingVisuals(ctx, runtime, eventId, "pi-continue resume running");
 	});
 
+	pi.on("input", async (event, ctx) => {
+		observeGoalContinuationPrompt(event.text, ctx);
+	});
+
 	pi.on("agent_end", async (_event, ctx) => {
 		const settlement = failRunningAwaitingContinuationResume(runtime, "Continuation resume did not produce an assistant response.");
 		if (settlement) {
+			workflowCoordination.releaseEvent(settlement.eventId);
 			settleWorkingVisuals(ctx, runtime, settlement.eventId);
 			return;
 		}
@@ -257,6 +343,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("message_end", async (event, ctx) => {
 		if (!isAssistantMessage(event.message)) return;
+		observeSameRunContinuation(ctx);
 		const message = normalizeMidRunGuardAbortMessage(runtime, event.message);
 		if (message === event.message) {
 			recordNativeCompactionAdoptionCheckpoint(runtime, message.stopReason);
@@ -267,14 +354,14 @@ export default function (pi: ExtensionAPI) {
 			if (eventId) emitContinuationLifecycle(pi, "controlled-abort", eventId);
 		}
 		const settlement = settleAwaitingContinuationResumeFromAssistant(runtime, message);
-		if (settlement) settleWorkingVisuals(ctx, runtime, settlement.eventId);
+		if (settlement) {
+			workflowCoordination.releaseEvent(settlement.eventId);
+			settleWorkingVisuals(ctx, runtime, settlement.eventId);
+		}
 		if (message !== event.message) return { message };
 	});
 
-	pi.on("turn_end", async (event, ctx) => {
-		if (isAssistantMessage(event.message)) {
-			restoreControlledMidRunGuardAbortMessage(event.message);
-		}
+	pi.on("turn_end", async (_event, ctx) => {
 		await runPercentageThresholdGuard(pi, ctx, runtime, (eventId) => cleanupPendingOutputWrites(eventId));
 	});
 
@@ -283,6 +370,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("context", async (event, ctx) => {
+		observeSameRunContinuation(ctx);
 		await runMidRunGuard(pi, ctx, runtime, event.messages, (eventId) => cleanupPendingOutputWrites(eventId));
 	});
 
@@ -290,6 +378,8 @@ export default function (pi: ExtensionAPI) {
 
 	async function prepareContinuationCompaction(event: NativeAwareSessionBeforeCompactEvent, ctx: ExtensionContext) {
 		const sessionId = ctx.sessionManager.getSessionId();
+		const compactionValues: readonly unknown[] = [event.branchEntries, event.preparation];
+		const goalWorkflowActive = workflowCoordination.isGoalOwner(ctx, compactionValues);
 		const initialOwnerEventId = getActiveContinuationEventId(runtime);
 		if (initialOwnerEventId !== undefined && runtime.latestEvent?.source === "adopted-compaction") {
 			return { cancel: true as const };
@@ -304,6 +394,7 @@ export default function (pi: ExtensionAPI) {
 			&& event.reason === "threshold"
 			&& event.willRetry !== true
 			&& piSettings
+			&& !goalWorkflowActive
 			&& shouldDeferNativeThresholdCompaction(
 				config,
 				piSettings,
@@ -314,7 +405,9 @@ export default function (pi: ExtensionAPI) {
 			return { cancel: true as const };
 		}
 		if (initialOwnerEventId === undefined && (!config.enabled || !config.adoptNativeCompaction)) return undefined;
-		if (initialOwnerEventId !== undefined && !config.enabled) return { cancel: true as const };
+		if (initialOwnerEventId !== undefined && !config.enabled) {
+			return goalWorkflowActive ? undefined : { cancel: true as const };
+		}
 		const internals = await loadPiInternals();
 		let ownerEventId = initialOwnerEventId;
 		let adopted = false;
@@ -344,8 +437,34 @@ export default function (pi: ExtensionAPI) {
 			if (ownerEventId === undefined) return undefined;
 			adopted = true;
 		}
+		const claimedOwner = workflowCoordination.claimEvent(ctx, ownerEventId, compactionValues);
+		if (claimedOwner === "goal") {
+			setContinuationResumeOwner(runtime, ownerEventId, "cooperative-workflow");
+		}
+		if (claimedOwner === "other") {
+			if (adopted) {
+				releaseAdoptedNativeCompaction(
+					ctx,
+					runtime,
+					ownerEventId,
+					"Another workflow owns the compaction boundary.",
+					(eventId) => cleanupPendingOutputWrites(eventId),
+				);
+			} else {
+				releaseContinuationToNativeFallback(
+					ctx,
+					runtime,
+					ownerEventId,
+					"Another workflow owns the compaction boundary.",
+					(eventId) => cleanupPendingOutputWrites(eventId),
+				);
+			}
+			return undefined;
+		}
 		const ownerStillActive = () => isActiveRunningContinuationEvent(runtime, ownerEventId);
-		const ownerLostResult = () => adopted ? undefined : { cancel: true as const };
+		const delegatedToWorkflow = () => runtime.pendingResumeDispatch?.eventId === ownerEventId
+			&& runtime.pendingResumeDispatch.resumeOwner === "cooperative-workflow";
+		const ownerLostResult = () => adopted || delegatedToWorkflow() ? undefined : { cancel: true as const };
 		if (!ownerStillActive()) return ownerLostResult();
 		const resolvedProjectContext = await resolveProjectContext(pi, ctx.cwd, sessionId, config.agentGuidePath);
 		if (!ownerStillActive()) return ownerLostResult();
@@ -427,6 +546,16 @@ export default function (pi: ExtensionAPI) {
 				);
 				return undefined;
 			}
+			if (delegatedToWorkflow()) {
+				releaseContinuationToNativeFallback(
+					ctx,
+					runtime,
+					ownerEventId,
+					SYNTHESIS_ABORT_MESSAGE,
+					(eventId) => cleanupPendingOutputWrites(eventId),
+				);
+				return undefined;
+			}
 			return { cancel: true as const };
 		}
 		const continuationArtifactWriteId = config.continuationArtifactMode === "always" ? randomUUID() : undefined;
@@ -472,6 +601,7 @@ export default function (pi: ExtensionAPI) {
 			ownerEventId,
 		);
 		if (adopted) markContinuationCompactionComplete(ctx, runtime, ownerEventId);
+		else armContinuationCompactionProofTimeout(ctx, runtime, ownerEventId);
 		return {
 			compaction: {
 				summary: composeCompactionSummary(historyArtifacts.briefMarkdown, details, {
@@ -493,6 +623,9 @@ export default function (pi: ExtensionAPI) {
 			return await prepareContinuationCompaction(event, ctx);
 		} catch (error) {
 			const activeEventId = getActiveContinuationEventId(runtime);
+			const delegatedToWorkflow = activeEventId !== undefined
+				&& runtime.pendingResumeDispatch?.eventId === activeEventId
+				&& runtime.pendingResumeDispatch.resumeOwner === "cooperative-workflow";
 			if (activeEventId && runtime.latestEvent?.source === "adopted-compaction") {
 				recordContinuationSynthesisFailure(runtime, activeEventId, normalizeSynthesisFailure(error));
 				markContinuationArtifact(runtime, activeEventId, "aborted", SYNTHESIS_ABORT_MESSAGE);
@@ -505,6 +638,17 @@ export default function (pi: ExtensionAPI) {
 				);
 				return undefined;
 			}
+			if (activeEventId && delegatedToWorkflow) {
+				releaseContinuationToNativeFallback(
+					ctx,
+					runtime,
+					activeEventId,
+					SYNTHESIS_ABORT_MESSAGE,
+					(eventId) => cleanupPendingOutputWrites(eventId),
+				);
+				return undefined;
+			}
+			if (activeEventId) workflowCoordination.releaseEvent(activeEventId);
 			return activeEventId ? { cancel: true } : undefined;
 		} finally {
 			compactionHandoffInFlight = false;
@@ -513,12 +657,37 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_compact", async (event, ctx) => {
 		const activeEventId = getActiveContinuationEventId(runtime);
+		let branchEntries: readonly unknown[] = [];
+		try {
+			branchEntries = ctx.sessionManager.getBranch();
+		} catch {
+			branchEntries = [];
+		}
+		const goalWorkflowActive = (activeEventId !== undefined
+			&& runtime.pendingResumeDispatch?.eventId === activeEventId
+			&& runtime.pendingResumeDispatch.resumeOwner === "cooperative-workflow")
+			|| workflowCoordination.isGoalOwner(ctx, [branchEntries, event.compactionEntry]);
+		if (activeEventId && goalWorkflowActive) {
+			setContinuationResumeOwner(runtime, activeEventId, "cooperative-workflow");
+			markContinuationCompactionRunMode(runtime, activeEventId, !ctx.isIdle());
+		}
 		const activeCompactionProofVerified = activeEventId !== undefined
 			&& runtime.latestEvent?.id === activeEventId
 			&& runtime.latestEvent.compactionProof.status === "verified";
 		if (activeEventId && !event.fromExtension) {
 			if (!activeCompactionProofVerified) {
-				failContinuationCompactionProof(ctx, runtime, activeEventId, NATIVE_COMPACTION_FALLBACK_FAILURE);
+				if (goalWorkflowActive) {
+					releaseContinuationToNativeFallback(
+						ctx,
+						runtime,
+						activeEventId,
+						NATIVE_COMPACTION_FALLBACK_FAILURE,
+						(eventId) => cleanupPendingOutputWrites(eventId),
+					);
+				} else {
+					failContinuationCompactionProof(ctx, runtime, activeEventId, NATIVE_COMPACTION_FALLBACK_FAILURE);
+					workflowCoordination.releaseEvent(activeEventId);
+				}
 			}
 			return;
 		}
@@ -526,18 +695,51 @@ export default function (pi: ExtensionAPI) {
 		const details = parseContinuationDetails(event.compactionEntry.details);
 		if (activeEventId && !details) {
 			if (!activeCompactionProofVerified) {
-				failContinuationCompactionProof(ctx, runtime, activeEventId, INVALID_COMPACTION_PROOF_FAILURE);
+				if (goalWorkflowActive) {
+					releaseContinuationToNativeFallback(
+						ctx,
+						runtime,
+						activeEventId,
+						INVALID_COMPACTION_PROOF_FAILURE,
+						(eventId) => cleanupPendingOutputWrites(eventId),
+					);
+				} else {
+					failContinuationCompactionProof(ctx, runtime, activeEventId, INVALID_COMPACTION_PROOF_FAILURE);
+					workflowCoordination.releaseEvent(activeEventId);
+				}
 			}
 			return;
 		}
 		if (!details) return;
 		if (!details.continuationEventId) {
 			if (activeEventId && !activeCompactionProofVerified) {
-				failContinuationCompactionProof(ctx, runtime, activeEventId, INVALID_COMPACTION_PROOF_FAILURE);
+				if (goalWorkflowActive) {
+					releaseContinuationToNativeFallback(
+						ctx,
+						runtime,
+						activeEventId,
+						INVALID_COMPACTION_PROOF_FAILURE,
+						(eventId) => cleanupPendingOutputWrites(eventId),
+					);
+				} else {
+					failContinuationCompactionProof(ctx, runtime, activeEventId, INVALID_COMPACTION_PROOF_FAILURE);
+					workflowCoordination.releaseEvent(activeEventId);
+				}
 			}
 			return;
 		}
-		if (activeEventId && details.continuationEventId !== activeEventId) return;
+		if (activeEventId && details.continuationEventId !== activeEventId) {
+			if (goalWorkflowActive && !activeCompactionProofVerified) {
+				releaseContinuationToNativeFallback(
+					ctx,
+					runtime,
+					activeEventId,
+					STALE_COMPACTION_PROOF_FAILURE,
+					(eventId) => cleanupPendingOutputWrites(eventId),
+				);
+			}
+			return;
+		}
 		const acceptedActiveProof = activeEventId !== undefined && details.continuationEventId === activeEventId
 			? verifyContinuationCompactionProof(ctx, runtime, activeEventId, event.compactionEntry.id)
 			: false;
@@ -582,16 +784,45 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("Agent guide unchanged; no full replacement was produced.", "info");
 		}
 		if (acceptedActiveProof && activeEventId) {
-			dispatchVerifiedContinuationResume(ctx, runtime, activeEventId);
+			completeContinuationCompactionFromHost(ctx, runtime, activeEventId);
 		}
 	});
 
+	registerOptionalExtensionEvent(pi, "session_compact_failed", (event, ctx) => {
+		const activeEventId = getActiveContinuationEventId(runtime);
+		if (!activeEventId || runtime.pendingResumeDispatch?.eventId !== activeEventId) return;
+		runtime.controlledMidRunAbortRequested = false;
+		let branchEntries: readonly unknown[] = [];
+		try {
+			branchEntries = ctx.sessionManager.getBranch();
+		} catch {
+			branchEntries = [];
+		}
+		const delegatedToWorkflow = runtime.pendingResumeDispatch?.eventId === activeEventId
+			&& runtime.pendingResumeDispatch.resumeOwner === "cooperative-workflow";
+		if (delegatedToWorkflow || workflowCoordination.isGoalOwner(ctx, [branchEntries, event])) {
+			releaseContinuationToNativeFallback(
+				ctx,
+				runtime,
+				activeEventId,
+				compactionFailureReason(event),
+				(eventId) => cleanupPendingOutputWrites(eventId),
+			);
+			return;
+		}
+		failContinuationCompactionProof(ctx, runtime, activeEventId, compactionFailureReason(event));
+		workflowCoordination.releaseEvent(activeEventId);
+	});
+
 	pi.on("session_shutdown", async (_event, ctx) => {
+		workflowCoordination.releaseAll();
+		workflowCoordination.unbindSession(ctx.sessionManager);
 		abandonActiveContinuationEvent(runtime, "Pi session shut down before continuation finished settling.");
 		pendingOutputWrites.clear();
 		clearWorkingVisuals(ctx, runtime);
 		ledgerOverlay.clear();
 		runtime.compactionRunning = false;
+		runtime.controlledMidRunAbortRequested = false;
 		runtime.guardFailureKey = undefined;
 		runtime.lastNoCompactableGuardKey = undefined;
 		clearNativeCompactionAdoptionCheckpoint(runtime);

@@ -9,6 +9,7 @@ import { buildContinuationArtifactPath } from "../extensions/continue/src/projec
 import { CONTINUATION_PROMPT } from "../extensions/continue/src/runtime.ts";
 import { SHAKE_CONTINUATION_PROMPT } from "../extensions/continue/src/continuation-prompt.ts";
 import { NO_PRE_COMPACTION_MESSAGES_KEPT_ENTRY_ID } from "../extensions/continue/src/compaction-preparation.ts";
+import { WorkflowCoordination } from "../extensions/continue/src/workflow-coordination.ts";
 
 function assistantMessage(stopReason = "stop") {
 	return {
@@ -83,6 +84,53 @@ function createFakePi(cwd) {
 			return { stdout: options?.cwd ?? cwd, code: 0 };
 		},
 	};
+}
+
+function enableWorkflowBus(pi) {
+	const subscribers = new Map();
+	pi.events.on = (channel, handler) => {
+		const handlers = subscribers.get(channel) ?? [];
+		handlers.push(handler);
+		subscribers.set(channel, handlers);
+		return () => {
+			const current = subscribers.get(channel) ?? [];
+			const index = current.indexOf(handler);
+			if (index >= 0) current.splice(index, 1);
+		};
+	};
+	const lifecycleEmit = pi.events.emit;
+	pi.events.emit = (channel, data) => {
+		lifecycleEmit(channel, data);
+		for (const handler of subscribers.get(channel) ?? []) handler(data);
+	};
+	return pi;
+}
+
+function holdWorkflowMutex(pi, sessionManager) {
+	let held = true;
+	const unsubscribe = pi.events.on("workflow:mutex:v1", (payload) => {
+		if (!held || payload?.session !== sessionManager || payload?.group !== "agent-workflow") return;
+		payload.busy = true;
+	});
+	return {
+		release() {
+			held = false;
+			unsubscribe();
+		},
+	};
+}
+
+function activeGoalContractEntry() {
+	return {
+		type: "custom",
+		customType: "goal-contract",
+		content: "Goal mode is active. Complete this goal fully.",
+		details: { version: 2, state: "active", goalId: "goal-fixture" },
+	};
+}
+
+function goalContinuationPrompt() {
+	return "Continue the active /goal until it is complete.\n\n<!-- pi-goal-continuation:goal-fixture:0:test-marker -->";
 }
 
 function continuationArtifactJson(agentGuideContent: string | null = null) {
@@ -317,6 +365,10 @@ function assertNoFailedSynthesisSideEffects(cwd, pi) {
 	assert.equal(existsSync(join(cwd, "AGENTS.md")), false);
 }
 
+async function flushHostCompaction(): Promise<void> {
+	await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
 test("extension registers only /continue and exact RPC-style /continue falls through to direct continuation", async () => {
 	const cwd = process.cwd();
 	const pi = createFakePi(cwd);
@@ -330,6 +382,7 @@ test("extension registers only /continue and exact RPC-style /continue falls thr
 	assert.equal(ctx.workingMessages.at(-1), "pi-continue verifying saved handoff");
 	assert.deepEqual(pi.sent, []);
 	await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+	await flushHostCompaction();
 	assert.equal(ctx.workingMessages.at(-1), "pi-continue resuming this session");
 	assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 	assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
@@ -365,6 +418,7 @@ test("palette continuation dispatches resume as follow-up", async () => {
 	assert.equal(ctx.compactCount, 1);
 	ctx.compactOptions.onComplete({});
 	await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+	await flushHostCompaction();
 	assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 	assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
 });
@@ -378,6 +432,7 @@ test("queued follow-up message_start starts same-session resume proof", async ()
 	await pi.commands.get("continue").handler("steer", ctx);
 	ctx.compactOptions.onComplete({});
 	await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+	await flushHostCompaction();
 	assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 	assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
 	await pi.events.get("message_start")({ message: userMessage(CONTINUATION_PROMPT) }, ctx);
@@ -411,6 +466,7 @@ test("mid-run guard dispatches resume as follow-up after context threshold proof
 		assert.equal(abortCount, 0);
 		ctx.compactOptions.onComplete({});
 		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+		await flushHostCompaction();
 		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 		assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
 	} finally {
@@ -436,6 +492,7 @@ test("context guard owns one compaction across an above-native abort boundary", 
 		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
 		ctx.getContextUsage = () => ({ tokens: 246577, percent: 95.57, contextWindow: 258000 });
 		ctx.setBranch(compactableToolBranch());
+		ctx.isIdle = () => false;
 		ctx.abort = () => {
 			abortCount += 1;
 		};
@@ -459,9 +516,8 @@ test("context guard owns one compaction across an above-native abort boundary", 
 		};
 		await pi.events.get("context")(contextEvent, ctx);
 		await pi.events.get("context")(contextEvent, ctx);
-		assert.equal(ctx.compactCount, 1);
-		assert.equal(abortCount, 0);
-		assert.match(ctx.compactOptions.customInstructions, /Estimated context: 246577 tokens\./);
+		assert.equal(ctx.compactCount, 0);
+		assert.equal(abortCount, 1);
 
 		const abortedError = {
 			...assistantMessage("error"),
@@ -478,9 +534,9 @@ test("context guard owns one compaction across an above-native abort boundary", 
 			{ phase: "controlled-abort", eventId: "continue-1" },
 		]]);
 		await pi.events.get("turn_end")({ message: replacement.message, toolResults: [] }, ctx);
-		assert.equal(replacement.message.stopReason, "aborted");
+		assert.equal(replacement.message.stopReason, "stop");
 		assert.equal(replacement.message.errorMessage, undefined);
-		assert.equal(ctx.compactCount, 1);
+		assert.equal(ctx.compactCount, 0);
 
 		const result = await pi.events.get("session_before_compact")(
 			compactionEvent({
@@ -499,9 +555,7 @@ test("context guard owns one compaction across an above-native abort boundary", 
 		};
 		await pi.events.get("session_compact")(savedEvent, ctx);
 		await pi.events.get("session_compact")(savedEvent, ctx);
-		assert.deepEqual(pi.sent, []);
-		ctx.compactOptions.onComplete({});
-		ctx.compactOptions.onComplete({});
+		await new Promise((resolve) => setTimeout(resolve, 0));
 		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 		assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
 		assert.deepEqual(notifications.filter(([, type]) => type !== "info"), []);
@@ -556,12 +610,225 @@ test("mechanical shake returns a zero-LLM compaction and offloads originals", as
 		// 摇树 handoff 的恢复使用简短引导词，不引用不存在的 LLM brief 结构。
 		ctx.compactOptions.onComplete({});
 		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+		await flushHostCompaction();
 		assert.deepEqual(pi.sent, [SHAKE_CONTINUATION_PROMPT]);
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 		rmSync(cwd, { recursive: true, force: true });
 		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("Goal-owned handoff keeps one pi-continue proof and one Goal resume", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-goal-coordination-"));
+	const faux = registerFauxProvider();
+	try {
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
+		}), "utf8");
+		faux.setResponses([fauxAssistantMessage(continuationArtifactJson())]);
+		const pi = enableWorkflowBus(createFakePi(cwd));
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...faux.models[0], contextWindow: 1000 };
+		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
+		const entries = [...compactableToolBranch(), activeGoalContractEntry()];
+		ctx.setBranch(entries);
+		registerContinueExtension(pi);
+		await pi.events.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		const goalMutex = holdWorkflowMutex(pi, ctx.sessionManager);
+		await pi.commands.get("continue").handler("steer", ctx);
+		assert.equal(ctx.compactCount, 1);
+		const preparation = compactionEvent({}, entries, { reason: "manual", willRetry: false });
+		const before = await pi.events.get("session_before_compact")(preparation, ctx);
+		assert.ok(before?.compaction);
+		assert.equal(before.compaction.details.kind, "pi-continue/v4");
+		ctx.compactOptions.onComplete({});
+		await pi.events.get("session_compact")({
+			fromExtension: true,
+			compactionEntry: {
+				id: "compact-goal-coordination",
+				summary: before.compaction.summary,
+				details: before.compaction.details,
+			},
+		}, ctx);
+		await flushHostCompaction();
+		assert.deepEqual(pi.sent, []);
+		const prompt = goalContinuationPrompt();
+		pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+		await pi.events.get("input")({ type: "input", text: prompt, source: "extension" }, ctx);
+		await flushHostCompaction();
+		await pi.events.get("before_agent_start")({ prompt }, ctx);
+		assert.equal(ctx.workingMessages.at(-1), "pi-continue resume running");
+		await pi.events.get("message_end")({ message: assistantMessage("stop") }, ctx);
+		assert.equal(ctx.workingMessages.at(-1), undefined);
+		assert.deepEqual(pi.sent, [prompt]);
+		goalMutex.release();
+	} finally {
+		faux.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("same-run Goal compaction settles from the host turn without a duplicate Goal prompt", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-goal-same-run-"));
+	const faux = registerFauxProvider();
+	try {
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
+		}), "utf8");
+		faux.setResponses([fauxAssistantMessage(continuationArtifactJson())]);
+		const pi = enableWorkflowBus(createFakePi(cwd));
+		const notifications = [];
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...faux.models[0], contextWindow: 1000 };
+		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
+		ctx.ui.notify = (message, type) => notifications.push([message, type]);
+		const entries = [...compactableToolBranch(), activeGoalContractEntry()];
+		ctx.setBranch(entries);
+		registerContinueExtension(pi);
+		await pi.events.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		const goalMutex = holdWorkflowMutex(pi, ctx.sessionManager);
+		await pi.commands.get("continue").handler("steer", ctx);
+		const before = await pi.events.get("session_before_compact")(compactionEvent({}, entries), ctx);
+		assert.ok(before?.compaction);
+		ctx.isIdle = () => false;
+		ctx.compactOptions.onComplete({});
+		await pi.events.get("session_compact")({
+			fromExtension: true,
+			compactionEntry: {
+				id: "compact-goal-same-run",
+				summary: before.compaction.summary,
+				details: before.compaction.details,
+			},
+		}, ctx);
+		assert.deepEqual(pi.sent, []);
+		await pi.events.get("context")({ messages: [userMessage("post-compaction context")] }, ctx);
+		assert.equal(ctx.workingMessages.at(-1), "pi-continue resume running");
+		await pi.events.get("message_end")({ message: assistantMessage("stop") }, ctx);
+		await pi.events.get("agent_end")({}, ctx);
+		assert.deepEqual(pi.sent, []);
+		assert.equal(ctx.workingMessages.at(-1), undefined);
+		assert.equal(notifications.some(([, type]) => type === "error"), false);
+		goalMutex.release();
+	} finally {
+		faux.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("Goal-owned mechanical shake delegates the single resume to Goal", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-goal-shake-"));
+	const agentDir = mkdtempSync(join(tmpdir(), "pi-continue-goal-shake-agent-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+	try {
+		mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
+		}), "utf8");
+		const pi = enableWorkflowBus(createFakePi(cwd));
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...ctx.model, contextWindow: 1000 };
+		const entries = [...shakeableToolBranch(), activeGoalContractEntry()];
+		ctx.setBranch(entries);
+		registerContinueExtension(pi);
+		await pi.events.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		const goalMutex = holdWorkflowMutex(pi, ctx.sessionManager);
+		await pi.commands.get("continue").handler("steer", ctx);
+		const before = await pi.events.get("session_before_compact")(compactionEvent({}, entries), ctx);
+		assert.ok(before?.compaction);
+		assert.match(before.compaction.summary, /mechanically shaken/);
+		ctx.compactOptions.onComplete({});
+		await pi.events.get("session_compact")({
+			fromExtension: true,
+			compactionEntry: {
+				id: "compact-goal-shake",
+				summary: before.compaction.summary,
+				details: before.compaction.details,
+			},
+		}, ctx);
+		await flushHostCompaction();
+		assert.deepEqual(pi.sent, []);
+		const prompt = goalContinuationPrompt();
+		pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+		await pi.events.get("input")({ type: "input", text: prompt, source: "extension" }, ctx);
+		await flushHostCompaction();
+		await pi.events.get("before_agent_start")({ prompt }, ctx);
+		assert.equal(ctx.workingMessages.at(-1), "pi-continue resume running");
+		assert.deepEqual(pi.sent, [prompt]);
+		goalMutex.release();
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("Goal-owned native threshold compaction remains available when adoption is disabled", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-goal-native-fallback-"));
+	try {
+		writePercentageConfig(cwd, 90, { adoptNativeCompaction: false });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
+		}), "utf8");
+		const pi = enableWorkflowBus(createFakePi(cwd));
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...ctx.model, contextWindow: 100 };
+		const entries = [...compactableToolBranch(), activeGoalContractEntry()];
+		ctx.setBranch(entries);
+		registerContinueExtension(pi);
+		await pi.events.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		const goalMutex = holdWorkflowMutex(pi, ctx.sessionManager);
+		const result = await pi.events.get("session_before_compact")(
+			compactionEvent({}, entries, { reason: "threshold", willRetry: false }),
+			ctx,
+		);
+		assert.equal(result, undefined);
+		assert.equal(ctx.compactCount, 0);
+		goalMutex.release();
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("Goal-owned synthesis failure yields to native compaction instead of cancelling it", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-goal-failure-"));
+	const faux = registerFauxProvider();
+	try {
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
+		}), "utf8");
+		faux.setResponses([fauxAssistantMessage("not-json")]);
+		const pi = enableWorkflowBus(createFakePi(cwd));
+		const notifications = [];
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...faux.models[0], contextWindow: 1000 };
+		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
+		ctx.ui.notify = (message, type) => notifications.push([message, type]);
+		const entries = [...compactableToolBranch(), activeGoalContractEntry()];
+		ctx.setBranch(entries);
+		registerContinueExtension(pi);
+		await pi.events.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		const goalMutex = holdWorkflowMutex(pi, ctx.sessionManager);
+		await pi.commands.get("continue").handler("steer", ctx);
+		const result = await pi.events.get("session_before_compact")(compactionEvent({}, entries), ctx);
+		assert.equal(result, undefined);
+		assert.equal(ctx.compactCount, 1);
+		assert.equal(notifications.some(([message, type]) => type === "error" && message.includes("handoff failed")), false);
+		const prompt = goalContinuationPrompt();
+		pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+		await pi.events.get("input")({ type: "input", text: prompt, source: "extension" }, ctx);
+		assert.deepEqual(pi.sent, [prompt]);
+		goalMutex.release();
+	} finally {
+		faux.unregister();
+		rmSync(cwd, { recursive: true, force: true });
 	}
 });
 
@@ -589,6 +856,51 @@ test("failed controlled handoff publishes the matching lifecycle failure", async
 		}, ctx);
 		await pi.events.get("turn_end")({ message: replacement.message, toolResults: [] }, ctx);
 		ctx.compactOptions.onError(new Error("compaction failed"));
+		assert.deepEqual(pi.lifecycleEvents, [
+			["pi-continue:handoff-lifecycle", { phase: "controlled-abort", eventId: "continue-1" }],
+			["pi-continue:handoff-lifecycle", { phase: "failed", eventId: "continue-1" }],
+		]);
+		assert.deepEqual(pi.sent, []);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("native delegated handoff reports host compaction failure without sending resume", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-native-compaction-failure-"));
+	try {
+		writePercentageConfig(cwd, 90, { adoptNativeCompaction: false });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+			compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
+		}), "utf8");
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = { ...ctx.model, contextWindow: 100 };
+		ctx.setBranch(compactableToolBranch());
+		ctx.isIdle = () => false;
+		let abortCount = 0;
+		ctx.abort = () => {
+			abortCount += 1;
+		};
+		registerContinueExtension(pi);
+		await pi.events.get("context")({
+			messages: [userMessage("run tool"), highUsageAssistantMessage(), toolResultMessage("x".repeat(160))],
+		}, ctx);
+		assert.equal(ctx.compactCount, 0);
+		assert.equal(abortCount, 1);
+		const replacement = await pi.events.get("message_end")({
+			message: {
+				...assistantMessage("error"),
+				content: [],
+				errorMessage: "This operation was aborted",
+			},
+		}, ctx);
+		assert.equal(replacement?.message.stopReason, "stop");
+		await pi.events.get("session_compact_failed")({
+			reason: "threshold",
+			aborted: true,
+		}, ctx);
 		assert.deepEqual(pi.lifecycleEvents, [
 			["pi-continue:handoff-lifecycle", { phase: "controlled-abort", eventId: "continue-1" }],
 			["pi-continue:handoff-lifecycle", { phase: "failed", eventId: "continue-1" }],
@@ -642,6 +954,7 @@ test("mid-run guard skips cleanly when Pi has no compactable session preparation
 		assert.equal(notifications[1][1], "info");
 		ctx.compactOptions.onComplete({});
 		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+		await flushHostCompaction();
 		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
@@ -675,6 +988,7 @@ test("mid-run guard chains when the resumed assistant tool loop fills context ag
 		await pi.commands.get("continue").handler("steer", ctx);
 		ctx.compactOptions.onComplete({});
 		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+		await flushHostCompaction();
 		await pi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, ctx);
 		await pi.events.get("message_end")({ message: highUsageAssistantMessage() }, ctx);
 		assert.equal(ctx.workingMessages.at(-1), "pi-continue resume running");
@@ -691,6 +1005,7 @@ test("mid-run guard chains when the resumed assistant tool loop fills context ag
 		]);
 		ctx.compactOptions.onComplete({});
 		await pi.events.get("session_compact")(ownedCompactionEvent("continue-2"), ctx);
+		await flushHostCompaction();
 		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT, CONTINUATION_PROMPT]);
 		await pi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, ctx);
 		await pi.events.get("message_end")({ message: assistantMessage() }, ctx);
@@ -906,6 +1221,7 @@ test("message_end settles failed and aborted resume outcomes without footer stat
 	await failedPi.commands.get("continue").handler("steer", failedCtx);
 	failedCtx.compactOptions.onComplete({});
 	await failedPi.events.get("session_compact")(ownedCompactionEvent(), failedCtx);
+	await flushHostCompaction();
 	await failedPi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, failedCtx);
 	await failedPi.events.get("message_end")({ message: assistantMessage("length") }, failedCtx);
 	assert.deepEqual(failedCtx.statusCalls, []);
@@ -917,6 +1233,7 @@ test("message_end settles failed and aborted resume outcomes without footer stat
 	await abortedPi.commands.get("continue").handler("steer", abortedCtx);
 	abortedCtx.compactOptions.onComplete({});
 	await abortedPi.events.get("session_compact")(ownedCompactionEvent(), abortedCtx);
+	await flushHostCompaction();
 	await abortedPi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, abortedCtx);
 	await abortedPi.events.get("message_end")({ message: assistantMessage("aborted") }, abortedCtx);
 	assert.deepEqual(abortedCtx.statusCalls, []);
@@ -925,7 +1242,7 @@ test("message_end settles failed and aborted resume outcomes without footer stat
 
 test("session_compact native or invalid active handoff proof fails closed without resume", async () => {
 	const cwd = process.cwd();
-	const nativePi = createFakePi(cwd);
+	const nativePi = enableWorkflowBus(createFakePi(cwd));
 	const nativeCtx = createCommandContext(cwd, async () => undefined);
 	registerContinueExtension(nativePi);
 	await nativePi.commands.get("continue").handler("steer", nativeCtx);
@@ -936,8 +1253,10 @@ test("session_compact native or invalid active handoff proof fails closed withou
 	nativeCtx.compactOptions.onComplete({});
 	assert.deepEqual(nativePi.sent, []);
 	assert.deepEqual(nativeCtx.statusCalls, []);
+	const nativeReplacement = new WorkflowCoordination(nativePi);
+	assert.equal(nativeReplacement.claimEvent(nativeCtx, "native-replacement", []), "self");
 
-	const invalidPi = createFakePi(cwd);
+	const invalidPi = enableWorkflowBus(createFakePi(cwd));
 	const invalidCtx = createCommandContext(cwd, async () => undefined);
 	registerContinueExtension(invalidPi);
 	await invalidPi.commands.get("continue").handler("steer", invalidCtx);
@@ -1029,6 +1348,7 @@ test("stale session_compact does not replace the latest owned ledger", async () 
 			details: { kind: "pi-continue/v4", readFiles: [], modifiedFiles: [], continuationEventId: "continue-1" },
 		},
 	}, ctx);
+	await flushHostCompaction();
 	await pi.events.get("session_compact")({
 		fromExtension: true,
 		compactionEntry: {
@@ -1067,6 +1387,7 @@ test("native and invalid session_compact events after verified proof do not clea
 		await pi.commands.get("continue").handler("steer", ctx);
 		ctx.compactOptions.onComplete({});
 		await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
+		await flushHostCompaction();
 		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 		await pi.events.get("session_compact")(staleEvent, ctx);
 		const compactCountBeforeRetry = ctx.compactCount;
@@ -1108,6 +1429,7 @@ test("verified proof is recorded before awaited ledger display work", async () =
 	assert.deepEqual(pi.sent, []);
 	releaseProjectContext();
 	await proofPromise;
+	await flushHostCompaction();
 	assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 });
 
@@ -1120,6 +1442,8 @@ test("verified proof can arrive before the compaction completion callback", asyn
 	await pi.events.get("session_compact")(ownedCompactionEvent(), ctx);
 	assert.deepEqual(pi.sent, []);
 	ctx.compactOptions.onComplete({});
+	assert.deepEqual(pi.sent, []);
+	await flushHostCompaction();
 	assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 	assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
 });
@@ -1260,6 +1584,7 @@ test("percentage threshold yields to one Pi native compaction after crossing the
 		};
 		await pi.events.get("session_compact")(savedEvent, ctx);
 		await pi.events.get("session_compact")(savedEvent, ctx);
+		await new Promise((resolve) => setTimeout(resolve, 0));
 		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 		assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
 		await pi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, ctx);
@@ -1308,7 +1633,8 @@ test("percentage compaction proof wins when a native compaction finishes before 
 				details: result.compaction.details,
 			},
 		}, ctx);
-		assert.deepEqual(pi.sent, []);
+		await flushHostCompaction();
+		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 		ctx.compactOptions.onError(new Error("Already compacted"));
 		ctx.compactOptions.onError(new Error("Already compacted"));
 		assert.equal(ctx.compactCount, 1);
@@ -1387,6 +1713,7 @@ test("native threshold adoption synthesizes one owned handoff and dispatches one
 		};
 		await pi.events.get("session_compact")(savedEvent, ctx);
 		await pi.events.get("session_compact")(savedEvent, ctx);
+		await new Promise((resolve) => setTimeout(resolve, 0));
 		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 		assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
 		await pi.events.get("before_agent_start")({ prompt: CONTINUATION_PROMPT }, ctx);
@@ -1466,7 +1793,8 @@ test("session_before_compact and session_compact write default artifact and conf
 		assert.match(artifactContent, /## Task\nContinue the task\./);
 		assert.match(artifactContent, /## Established/);
 		assert.match(readFileSync(join(cwd, "AGENTS.md"), "utf8"), /Durable rule/);
-		assert.deepEqual(pi.sent, []);
+		await flushHostCompaction();
+		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 	} finally {
 		faux.unregister();
 		rmSync(cwd, { recursive: true, force: true });
@@ -1712,6 +2040,7 @@ test("late compaction for abandoned owner does not fail a newer active handoff",
 		assert.equal(existsSync(continuationArtifactPath(cwd)), false);
 		assert.equal(existsSync(join(cwd, "AGENTS.md")), false);
 		await pi.events.get("session_compact")(ownedCompactionEvent("continue-2"), ctx);
+		await flushHostCompaction();
 		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
 	} finally {
 		faux.unregister();

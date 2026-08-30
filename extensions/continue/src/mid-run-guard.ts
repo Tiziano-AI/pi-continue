@@ -203,6 +203,23 @@ export function decideMidRunGuardTrigger(input: MidRunGuardDecisionInput): MidRu
 	};
 }
 
+/** 只有宿主原生阈值已达到时才交给回合结束压缩，较早的自定义百分比仍走显式压缩。 */
+export function shouldDelegateMidRunCompactionToNative(
+	trigger: MidRunGuardTrigger,
+	piSettings: PiCompactionSettings,
+): boolean {
+	if (
+		!Number.isSafeInteger(piSettings.reserveTokens)
+		|| piSettings.reserveTokens <= 0
+		|| trigger.contextWindow <= piSettings.reserveTokens
+	) {
+		return false;
+	}
+	const nativeThresholdTokens = trigger.contextWindow - piSettings.reserveTokens;
+	return trigger.thresholdTokens > nativeThresholdTokens
+		|| trigger.estimatedTokens > nativeThresholdTokens;
+}
+
 async function startResolvedGuard(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
@@ -212,8 +229,8 @@ async function startResolvedGuard(
 	internals: Awaited<ReturnType<typeof loadPiInternals>>,
 	onContinuationFailed?: (eventId: string) => void,
 ): Promise<void> {
-	// 自动守卫共享当前 compaction 所有权，重复事件不应再次中止运行或重复告警。
-	if (runtime.compactionRunning) return;
+	// 自动守卫共享当前 handoff 的生命周期，重复事件不应再次中止运行或重复告警。
+	if (runtime.compactionRunning || runtime.pendingResumeDispatch !== undefined) return;
 	const branchEntries = ctx.sessionManager.getBranch();
 	const preparation = internals.prepareCompaction(branchEntries, piSettings);
 	if (!hasNativeCompactionPreparation(preparation, branchEntries, piSettings, internals.estimateTokens)) {
@@ -227,6 +244,7 @@ async function startResolvedGuard(
 		trigger,
 		abortActiveRun: true,
 		continueAfterComplete: true,
+		deferToNativeCompaction: shouldDelegateMidRunCompactionToNative(trigger, piSettings),
 		sendContinuation: (prompt) => sendContinuationPrompt(pi, prompt),
 		onContinuationFailed,
 	});
