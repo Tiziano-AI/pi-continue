@@ -2,14 +2,14 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { loadHistoryPromptAssets } from "./assets.ts";
-import { normalizeCompactionPreparation, snapshotFileOperations, stripCompactionPreparationMessages, type ContinuationCompactionPreparation } from "./compaction-preparation.ts";
+import { normalizeCompactionPreparation, snapshotFileOperations, stripCompactionPreparationMessages } from "./compaction-preparation.ts";
+import { prepareCompaction, renderConversationTranscript } from "./compaction-planning.ts";
 import { CONTINUATION_PROMPT } from "./continuation-prompt.ts";
 import { loadContinuationConfig, loadScopeConfig, patchContinuationConfig, resetContinuationConfig } from "./config.ts";
 import { showLatestContinuationLedger, type ContinuationLedgerOverlayController } from "./ledger-viewer.ts";
 import { showScrollableTextOverlay } from "./text-viewer.ts";
 import { readEffectivePiCompactionSettings } from "./pi-settings.ts";
 import { renderHandoffTrigger, updateHandoffTriggerFromDialog } from "./pi-threshold-settings.ts";
-import { loadPiInternals } from "./pi-internals.ts";
 import { isContinuationPromptUserMessage } from "./prompt-dispatch.ts";
 import { compileHistoryPrompt, renderPromptPreview } from "./prompt.ts";
 import { resolveProjectContext } from "./project.ts";
@@ -50,18 +50,17 @@ async function buildPromptPreviewPayload(
 	const config = loadContinuationConfig(initialProjectContext.projectRoot);
 	const projectContext = await resolveProjectContext(pi, ctx.cwd, sessionId, config.agentGuidePath);
 	const piCompactionSettings = readEffectivePiCompactionSettings(projectContext.projectRoot);
-	const internals = await loadPiInternals();
 	const branchEntries = ctx.sessionManager.getBranch();
-	const rawPreparation = internals.prepareCompaction(branchEntries, piCompactionSettings) as ContinuationCompactionPreparation | undefined;
+	const rawPreparation = prepareCompaction(branchEntries, piCompactionSettings);
 	if (!rawPreparation) return undefined;
 	const preparation = stripCompactionPreparationMessages(
 		normalizeCompactionPreparation(rawPreparation, branchEntries),
 		(message) => isContinuationPromptUserMessage(message, CONTINUATION_PROMPT),
 	);
 	const scenario = preparation.previousSummary ? "update" : "initial";
-	const historyTranscript = internals.serializeConversation(internals.convertToLlm(preparation.messagesToSummarize));
+	const historyTranscript = renderConversationTranscript(preparation.messagesToSummarize);
 	const turnPrefixTranscript = preparation.isSplitTurn && preparation.turnPrefixMessages.length > 0
-		? internals.serializeConversation(internals.convertToLlm(preparation.turnPrefixMessages))
+		? renderConversationTranscript(preparation.turnPrefixMessages)
 		: undefined;
 	const fileOps = snapshotFileOperations(preparation.fileOps);
 	const historyAssets = loadHistoryPromptAssets(projectContext.projectRoot, config.promptOverridePolicy, scenario);
@@ -101,7 +100,7 @@ async function chooseModel(ctx: ExtensionCommandContext): Promise<string | undef
 	return selected;
 }
 
-const ALL_REASONING_OPTIONS: readonly ContinuationConfig["reasoning"][] = ["inherit", "off", "minimal", "low", "medium", "high", "xhigh"];
+const ALL_REASONING_OPTIONS: readonly ContinuationConfig["reasoning"][] = ["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /** Return operator-selectable reasoning levels, hiding levels unsupported by the resolved summarizer model. */
 export function getReasoningOptionsForModel(model: Model<Api> | undefined): ContinuationConfig["reasoning"][] {

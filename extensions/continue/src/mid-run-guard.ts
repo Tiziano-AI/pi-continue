@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadContinuationConfig } from "./config.ts";
 import { normalizeCompactionPreparation, type ContinuationCompactionPreparation } from "./compaction-preparation.ts";
+import { estimateContextTokens, estimateMessageTokens, prepareCompaction } from "./compaction-planning.ts";
 import { readEffectivePiCompactionSettings } from "./pi-settings.ts";
-import { loadPiInternals } from "./pi-internals.ts";
 import { resolveProjectContext } from "./project.ts";
 import { sendContinuationPrompt } from "./prompt-dispatch.ts";
 import { startContinuationCompaction, type ContinuationRuntimeState } from "./runtime.ts";
@@ -178,8 +178,7 @@ export async function runMidRunGuard(
 	const config = loadContinuationConfig(initialProjectContext.projectRoot);
 	if (!config.enabled || !config.midRunGuardEnabled) return;
 	const piSettings = readEffectivePiCompactionSettings(initialProjectContext.projectRoot);
-	const internals = await loadPiInternals();
-	const estimate = internals.estimateContextTokens(messages);
+	const estimate = estimateContextTokens(messages);
 	const trigger = decideMidRunGuardTrigger({
 		config,
 		piSettings,
@@ -188,8 +187,8 @@ export async function runMidRunGuard(
 	});
 	if (!trigger) return;
 	const branchEntries = ctx.sessionManager.getBranch();
-	const preparation = internals.prepareCompaction(branchEntries, piSettings);
-	if (!hasNativeCompactionPreparation(preparation, branchEntries, piSettings, internals.estimateTokens)) {
+	const preparation = prepareCompaction(branchEntries, piSettings);
+	if (!hasNativeCompactionPreparation(preparation, branchEntries, piSettings, estimateMessageTokens)) {
 		notifyNoCompactableSession(ctx, runtime, trigger, piSettings);
 		return;
 	}

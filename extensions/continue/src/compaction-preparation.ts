@@ -81,7 +81,7 @@ function messageRole(entry: EntryRecord | undefined): string | undefined {
 	return messageRoleOf(entry?.message);
 }
 
-function createFileOps(): FileOperations {
+export function createFileOps(): FileOperations {
 	return {
 		read: new Set<string>(),
 		written: new Set<string>(),
@@ -134,7 +134,7 @@ function messagesFromEntryRange(entries: EntryRecord[], startIndex: number, endI
 	return messages;
 }
 
-function extractFileOpsFromMessage(message: unknown, fileOps: FileOperations): void {
+export function extractFileOpsFromMessage(message: unknown, fileOps: FileOperations): void {
 	const record = asMessage(message);
 	if (!record || record.role !== "assistant" || !Array.isArray(record.content)) return;
 	for (const block of record.content) {

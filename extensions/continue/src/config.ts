@@ -18,6 +18,7 @@ const REASONING_LEVELS = new Set<ContinuationReasoning>([
 	"medium",
 	"high",
 	"xhigh",
+	"max",
 ]);
 const PROMPT_OVERRIDE_POLICIES = new Set<PromptOverridePolicy>([
 	"package-default",

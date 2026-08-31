@@ -30,7 +30,7 @@ pi -e /absolute/path/to/pi-continue
 
 Pi packages run with your local user permissions. Review package source before installing third-party packages.
 
-Requires Pi `0.74.0` or newer, where model-specific thinking support is described by `thinkingLevelMap`.
+Requires Pi `0.84.0` or newer.
 
 ## Use `/continue`
 

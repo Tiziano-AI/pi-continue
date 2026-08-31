@@ -4,6 +4,16 @@ All notable changes to `pi-continue` are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- Resolved Pi's compaction planning through the public package API instead of importing internal `dist/` modules at runtime. Managed installs (Node builds and standalone binaries) never contain a physical `@earendil-works/pi-coding-agent` copy in the agent npm tree, so `import.meta.resolve()` plus filesystem imports threw `Cannot find module '@earendil-works/pi-coding-agent'` on every mid-run guard evaluation and surfaced as `automatic continuation: handoff failed` on auto-compact. Closes #12 and #11.
+- The planning is now composed from the installed Pi's own `findCutPoint`, `buildSessionContext`, `estimateTokens`, and related public exports, so cut-point and token-estimation behavior tracks the running Pi release instead of a pinned internal implementation, and the guard no longer starts compactions that Pi would reject as "Nothing to compact".
+
+### Changed
+
+- Raised the supported Pi minimum to `0.84.0`; the package targets the current Pi release line and no longer carries older-release compatibility shims.
+- Reasoning options include the `max` level supported by current Pi models.
+
 ## 0.9.3 - 2026-07-08
 
 ### Changed

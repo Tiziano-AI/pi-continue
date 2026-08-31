@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -222,10 +223,16 @@ function branchToolResultEntry(id, parentId, toolCallId, text, toolName = "read"
 }
 
 function compactableToolBranch() {
+	// Two completed turns so the current Pi (0.84.x) cut point lands on the second
+	// assistant message and the first turn is summarized; a single short turn is
+	// fully inside the recent keep window and has no compactable history.
 	return [
 		branchMessageEntry("branch-user", null, userMessage(`run tool ${"x".repeat(80)}`)),
 		branchAssistantToolEntry("branch-assistant", "branch-user", "tool-1", "/repo/file.ts"),
-		branchToolResultEntry("branch-result", "branch-assistant", "tool-1", "x"),
+		branchToolResultEntry("branch-result", "branch-assistant", "tool-1", "x".repeat(20)),
+		branchMessageEntry("branch-user-2", "branch-result", userMessage(`run tool ${"x".repeat(80)}`)),
+		branchAssistantToolEntry("branch-assistant-2", "branch-user-2", "tool-2", "/repo/file.ts"),
+		branchToolResultEntry("branch-result-2", "branch-assistant-2", "tool-2", "x".repeat(20)),
 	];
 }
 
