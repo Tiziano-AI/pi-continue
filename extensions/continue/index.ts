@@ -69,7 +69,7 @@ import {
 	observeCooperativeContinuationTurn,
 	setContinuationResumeOwner,
 } from "./src/resume-proof.ts";
-import type { AgentGuideWriteStatus, ContinuationCompactionDetails, ContinuationConfig, ContinuationSynthesisFailure, ContinuationSynthesisTelemetry, ParsedHistoryArtifacts, PendingOutputWrite, WriteMode } from "./src/types.ts";
+import type { AgentGuideWriteStatus, ContinuationCompactionDetails, ContinuationConfig, ContinuationLedgerSnapshot, ContinuationSynthesisFailure, ContinuationSynthesisTelemetry, ParsedHistoryArtifacts, PendingOutputWrite, WriteMode } from "./src/types.ts";
 import {
 	clearWorkingVisuals,
 	settleWorkingVisuals,
@@ -130,6 +130,11 @@ function compactionFailureReason(event: unknown): string {
 const OUTPUT_WRITE_FAILURE = "Output write failed; check the configured path and permissions.";
 const PENDING_OUTPUT_WRITE_FAILURE = "Output write did not complete before continuation failed.";
 const CONTINUATION_LIFECYCLE_CHANNEL = "pi-continue:handoff-lifecycle";
+
+interface DeferredOutputWrite {
+	writeId: string;
+	pending: PendingOutputWrite;
+}
 
 type ContinuationLifecyclePhase = "controlled-abort" | "failed";
 
@@ -212,6 +217,7 @@ async function evaluateMechanicalShake(
 
 export default function (pi: ExtensionAPI) {
 	const pendingOutputWrites = new Map<string, PendingOutputWrite>();
+	const deferredOutputWrites = new Map<string, PendingOutputWrite>();
 	const runtime = createContinuationRuntimeState();
 	const ledgerOverlay = createContinuationLedgerOverlayController();
 	const workflowCoordination = new WorkflowCoordination(pi);
@@ -219,15 +225,118 @@ export default function (pi: ExtensionAPI) {
 	function cleanupPendingOutputWrites(eventId: string): void {
 		emitContinuationLifecycle(pi, "failed", eventId);
 		let removed = false;
-		for (const [writeId, pending] of pendingOutputWrites) {
-			if (pending.eventId !== eventId) continue;
-			pendingOutputWrites.delete(writeId);
-			removed = true;
+		for (const writes of [pendingOutputWrites, deferredOutputWrites]) {
+			for (const [writeId, pending] of writes) {
+				if (pending.eventId !== eventId) continue;
+				writes.delete(writeId);
+				removed = true;
+			}
 		}
 		if (removed) {
 			failPendingOutputWritesForEvent(runtime, eventId, PENDING_OUTPUT_WRITE_FAILURE);
 		}
 		workflowCoordination.releaseEvent(eventId);
+	}
+
+	function takePendingOutputWrites(details: ContinuationCompactionDetails): DeferredOutputWrite[] {
+		const writes: DeferredOutputWrite[] = [];
+		for (const writeId of [details.continuationArtifactWriteId, details.agentGuideWriteId]) {
+			if (!writeId || deferredOutputWrites.has(writeId)) continue;
+			const pending = pendingOutputWrites.get(writeId);
+			pendingOutputWrites.delete(writeId);
+			if (!pending || !isActiveRunningContinuationEvent(runtime, pending.eventId)) continue;
+			deferredOutputWrites.set(writeId, pending);
+			writes.push({ writeId, pending });
+		}
+		return writes;
+	}
+
+	function discardDeferredOutputWrites(writes: readonly DeferredOutputWrite[]): void {
+		for (const deferred of writes) {
+			if (deferredOutputWrites.get(deferred.writeId) === deferred.pending) {
+				deferredOutputWrites.delete(deferred.writeId);
+			}
+		}
+	}
+
+	function canApplyPostCompactionEffects(eventId: string | undefined): boolean {
+		if (!eventId) return true;
+		const latest = runtime.latestEvent;
+		return latest?.id === eventId && latest.status !== "failed";
+	}
+
+	async function applyPostCompactionEffects(
+		ctx: ExtensionContext,
+		details: ContinuationCompactionDetails,
+		ledger: ContinuationLedgerSnapshot | undefined,
+		writes: readonly DeferredOutputWrite[],
+	): Promise<void> {
+		if (!canApplyPostCompactionEffects(details.continuationEventId ?? writes[0]?.pending.eventId)) {
+			discardDeferredOutputWrites(writes);
+			return;
+		}
+		if (ledger) {
+			try {
+				const projectContext = await resolveProjectContext(pi, ctx.cwd, ctx.sessionManager.getSessionId());
+				const config = loadContinuationConfig(projectContext.projectRoot);
+				if (config.enabled && config.showAfterCompact) {
+					ledgerOverlay.showSoon(ctx, ledger, (reason) => {
+						if (ctx.hasUI) ctx.ui.notify(`Could not open Continuation Ledger: ${reason}`, "error");
+					});
+				}
+			} catch {
+				// 宿主已经确认压缩结果；显示层失败不能重新打开压缩窗口或阻断恢复。
+			}
+		}
+		for (const deferred of writes) {
+			const pending = deferred.pending;
+			if (!canApplyPostCompactionEffects(pending.eventId)
+				|| deferredOutputWrites.get(deferred.writeId) !== pending) continue;
+			try {
+				const result = await writeNormalizedMarkdownFile(pending.path, pending.content);
+				if (deferredOutputWrites.get(deferred.writeId) === pending) {
+					recordOutputWriteResult(runtime, pending.eventId, pending.target, result, undefined);
+					if (ctx.hasUI) {
+						ctx.ui.notify(
+							result === "updated"
+								? `Updated ${pending.label}.`
+								: `${pending.label} was already up to date.`,
+							"info",
+						);
+					}
+				}
+			} catch {
+				if (deferredOutputWrites.get(deferred.writeId) === pending) {
+					recordOutputWriteResult(runtime, pending.eventId, pending.target, "failed", OUTPUT_WRITE_FAILURE);
+					if (ctx.hasUI) ctx.ui.notify(`Could not update ${pending.label}: ${OUTPUT_WRITE_FAILURE}`, "error");
+				}
+			} finally {
+				if (deferredOutputWrites.get(deferred.writeId) === pending) deferredOutputWrites.delete(deferred.writeId);
+			}
+		}
+		if (ctx.hasUI && details.agentGuideWriteStatus === "no-replacement" && details.agentGuideChangeReason) {
+			ctx.ui.notify("Agent guide unchanged; no full replacement was produced.", "info");
+		}
+	}
+
+	function deferCooperativePostCompactionEffects(
+		ctx: ExtensionContext,
+		details: ContinuationCompactionDetails,
+		ledger: ContinuationLedgerSnapshot | undefined,
+		writes: readonly DeferredOutputWrite[],
+	): void {
+		const session = ctx.sessionManager;
+		const generation = workflowCoordination.getGeneration();
+		// 定时任务必须晚于 session_compact 处理器返回，才能越过 Pi 手动压缩控制器的占用窗口。
+		setTimeout(() => {
+			if (!workflowCoordination.isCurrent(session, generation)) {
+				discardDeferredOutputWrites(writes);
+				return;
+			}
+			void applyPostCompactionEffects(ctx, details, ledger, writes).catch(() => {
+				discardDeferredOutputWrites(writes);
+			});
+		}, 0);
 	}
 
 	function observeGoalContinuationPrompt(text: string, ctx: ExtensionContext): boolean {
@@ -775,41 +884,15 @@ export default function (pi: ExtensionAPI) {
 		const ledger = canUpdateLedger
 			? buildLedgerSnapshot(event.compactionEntry.summary, ledgerOwnerId, event.compactionEntry.id)
 			: undefined;
-		if (ledger) {
-			runtime.latestLedger = ledger;
-			const projectContext = await resolveProjectContext(pi, ctx.cwd, ctx.sessionManager.getSessionId());
-			const config = loadContinuationConfig(projectContext.projectRoot);
-			if (config.enabled && config.showAfterCompact) {
-				ledgerOverlay.showSoon(ctx, ledger, (reason) => {
-					if (ctx.hasUI) ctx.ui.notify(`Could not open Continuation Ledger: ${reason}`, "error");
-				});
+		if (ledger) runtime.latestLedger = ledger;
+		const pendingWrites = takePendingOutputWrites(details);
+		if (acceptedActiveProof && activeEventId && goalWorkflowActive) {
+			if (completeContinuationCompactionFromHost(ctx, runtime, activeEventId)) {
+				deferCooperativePostCompactionEffects(ctx, details, ledger, pendingWrites);
+				return;
 			}
 		}
-		for (const writeId of [details.continuationArtifactWriteId, details.agentGuideWriteId]) {
-			if (!writeId) continue;
-			const pending = pendingOutputWrites.get(writeId);
-			pendingOutputWrites.delete(writeId);
-			if (!pending) continue;
-			if (!isActiveRunningContinuationEvent(runtime, pending.eventId)) continue;
-			try {
-				const result = await writeNormalizedMarkdownFile(pending.path, pending.content);
-				recordOutputWriteResult(runtime, pending.eventId, pending.target, result, undefined);
-				if (ctx.hasUI) {
-					ctx.ui.notify(
-						result === "updated"
-							? `Updated ${pending.label}.`
-							: `${pending.label} was already up to date.`,
-						"info",
-					);
-				}
-			} catch {
-				recordOutputWriteResult(runtime, pending.eventId, pending.target, "failed", OUTPUT_WRITE_FAILURE);
-				if (ctx.hasUI) ctx.ui.notify(`Could not update ${pending.label}: ${OUTPUT_WRITE_FAILURE}`, "error");
-			}
-		}
-		if (ctx.hasUI && details.agentGuideWriteStatus === "no-replacement" && details.agentGuideChangeReason) {
-			ctx.ui.notify("Agent guide unchanged; no full replacement was produced.", "info");
-		}
+		await applyPostCompactionEffects(ctx, details, ledger, pendingWrites);
 		if (acceptedActiveProof && activeEventId) {
 			completeContinuationCompactionFromHost(ctx, runtime, activeEventId);
 		}
@@ -846,6 +929,7 @@ export default function (pi: ExtensionAPI) {
 		workflowCoordination.unbindSession(ctx.sessionManager);
 		abandonActiveContinuationEvent(runtime, "Pi session shut down before continuation finished settling.");
 		pendingOutputWrites.clear();
+		deferredOutputWrites.clear();
 		clearWorkingVisuals(ctx, runtime);
 		ledgerOverlay.clear();
 		runtime.compactionRunning = false;

@@ -182,6 +182,65 @@ test("same-run cooperative compaction accepts the resumed host turn without a du
 	assert.equal(runtime.latestEvent?.resume.status, "completed");
 });
 
+test("cooperative handoff fails closed when no external prompt is observed", async () => {
+	const owner = createContext(true);
+	const ctx = bindContext(owner);
+	const runtime = createContinuationRuntimeState();
+	const failedEvents = [];
+	const continuations = [];
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "command-steer",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: false,
+		continueAfterComplete: true,
+		resumeOwner: "cooperative-workflow",
+		resumeStartTimeoutMs: 0,
+		sendContinuation: (prompt) => continuations.push(prompt),
+		onContinuationFailed: (eventId) => failedEvents.push(eventId),
+	});
+	assert.equal(started, true);
+	owner.compactOptions.onComplete({});
+	acceptContinuationCompactionProof(ctx, runtime, "continue-1", "compact-1");
+	await flushResumeDispatch();
+	await flushResumeDispatch();
+	assert.deepEqual(continuations, []);
+	assert.deepEqual(failedEvents, ["continue-1"]);
+	assert.equal(runtime.pendingResumeDispatch, undefined);
+	assert.equal(runtime.awaitingResumeEventId, undefined);
+	assert.equal(runtime.latestEvent?.status, "failed");
+	assert.equal(runtime.latestEvent?.resume.status, "not-requested");
+	assert.match(runtime.latestEvent?.failureReason ?? "", /did not submit its continuation request/);
+});
+
+test("cooperative handoff keeps an active host grace bounded when no prompt arrives", async () => {
+	const owner = createContext(false);
+	const ctx = bindContext(owner);
+	const runtime = createContinuationRuntimeState();
+	const failedEvents = [];
+	const continuations = [];
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "command-steer",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: false,
+		continueAfterComplete: true,
+		resumeOwner: "cooperative-workflow",
+		resumeStartTimeoutMs: 0,
+		sendContinuation: (prompt) => continuations.push(prompt),
+		onContinuationFailed: (eventId) => failedEvents.push(eventId),
+	});
+	assert.equal(started, true);
+	markContinuationCompactionRunMode(runtime, "continue-1", true);
+	owner.compactOptions.onComplete({});
+	acceptContinuationCompactionProof(ctx, runtime, "continue-1", "compact-1");
+	for (let flush = 0; flush < 8; flush += 1) await flushResumeDispatch();
+	assert.deepEqual(continuations, []);
+	assert.deepEqual(failedEvents, ["continue-1"]);
+	assert.equal(runtime.pendingResumeDispatch, undefined);
+	assert.equal(runtime.latestEvent?.status, "failed");
+});
+
 test("continuation leaves active-run cancellation to ctx.compact", () => {
 	const owner = createContext(false);
 	const ctx = bindContext(owner);

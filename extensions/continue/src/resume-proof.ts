@@ -18,6 +18,11 @@ export const COMPACTION_PROOF_TIMEOUT_FAILURE = "Pi did not report a saved packa
 export const NATIVE_COMPACTION_FALLBACK_FAILURE = "Pi saved a native compaction instead of a package-owned continuation handoff.";
 export const INVALID_COMPACTION_PROOF_FAILURE = "Pi saved a compaction without valid pi-continue/v4 handoff details.";
 export const STALE_COMPACTION_PROOF_FAILURE = "Pi saved a continuation handoff for a different run; resume was stopped.";
+export const COOPERATIVE_RESUME_REQUEST_FAILURE = "The cooperative workflow did not submit its continuation request.";
+// 协作工作流若在宿主压缩返回后仍未提交提示或开启续行，应尽快释放失败状态而不是挂住整段恢复超时。
+const COOPERATIVE_HANDOFF_GRACE_MS = 1_000;
+// 宿主仍在运行时允许少量续期，覆盖慢速协作处理器，同时保持无响应路径有界收束。
+const COOPERATIVE_HANDOFF_ACTIVE_GRACE_EXTENSIONS = 4;
 
 export interface PendingResumeDispatch {
 	eventId: string;
@@ -35,6 +40,7 @@ export interface PendingResumeDispatch {
 	externalPromptObserved: boolean;
 	/** 当压缩发生在仍在运行的宿主回合中时为真。 */
 	sameRunCompaction: boolean;
+	externalResumeGraceExtensions: number;
 }
 
 export interface AwaitingResumeStart {
@@ -142,6 +148,7 @@ export function preparePendingResumeDispatch(runtime: ResumeProofRuntimeState, o
 		resumeOwner: options.resumeOwner ?? "pi-continue",
 		externalPromptObserved: false,
 		sameRunCompaction: options.sameRunCompaction ?? false,
+		externalResumeGraceExtensions: 0,
 	};
 }
 
@@ -205,8 +212,19 @@ function scheduleExternalResumeTimeout(ctx: ExtensionContext, runtime: ResumePro
 			|| current.resumeOwner !== "cooperative-workflow"
 			|| current.externalPromptObserved
 		) return;
-		failContinuationCompactionProof(ctx, runtime, pending.eventId, "The cooperative workflow did not submit its continuation request.");
-	}, Math.max(0, pending.resumeStartTimeoutMs));
+		let hostStillRunning = false;
+		try {
+			hostStillRunning = pending.sameRunCompaction && !ctx.isIdle();
+		} catch {
+			hostStillRunning = false;
+		}
+		if (hostStillRunning && pending.externalResumeGraceExtensions < COOPERATIVE_HANDOFF_ACTIVE_GRACE_EXTENSIONS) {
+			pending.externalResumeGraceExtensions += 1;
+			scheduleExternalResumeTimeout(ctx, runtime, pending);
+			return;
+		}
+		failContinuationCompactionProof(ctx, runtime, pending.eventId, COOPERATIVE_RESUME_REQUEST_FAILURE);
+	}, Math.max(0, Math.min(pending.resumeStartTimeoutMs, COOPERATIVE_HANDOFF_GRACE_MS)));
 	runtime.externalResumeTimeout = timeout;
 	unrefTimer(timeout);
 }

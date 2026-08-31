@@ -730,6 +730,97 @@ test("Goal-owned handoff keeps one pi-continue proof and one Goal resume", async
 	}
 });
 
+test("Goal-owned compaction releases the host boundary before post-compaction I/O", async () => {
+	for (const order of ["goal-first", "continue-first"]) {
+		const cwd = mkdtempSync(join(tmpdir(), `pi-continue-goal-boundary-${order}-`));
+		const faux = registerFauxProvider();
+		try {
+			mkdirSync(join(cwd, ".pi"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({
+				compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
+			}), "utf8");
+			mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "extensions", "pi-continue.json"), JSON.stringify({
+				continuationArtifactMode: "always",
+			}), "utf8");
+			faux.setResponses([fauxAssistantMessage(continuationArtifactJson())]);
+			const pi = enableWorkflowBus(createFakePi(cwd));
+			const ctx = createCommandContext(cwd, async () => undefined);
+			ctx.model = { ...faux.models[0], contextWindow: 1000 };
+			ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
+			ctx.setBranch([...compactableToolBranch(), activeGoalContractEntry()]);
+			registerContinueExtension(pi);
+			await pi.events.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+			const goalMutex = holdWorkflowMutex(pi, ctx.sessionManager);
+			await pi.commands.get("continue").handler("steer", ctx);
+			const before = await pi.events.get("session_before_compact")(compactionEvent({}, ctx.sessionManager.getBranch()), ctx);
+			assert.ok(before?.compaction);
+			ctx.compactOptions.onComplete({});
+
+			let releaseProjectContext = () => {};
+			let projectContextRequested = false;
+			pi.exec = async (command, args, options) => {
+				assert.equal(command, "git");
+				assert.deepEqual(args, ["rev-parse", "--show-toplevel"]);
+				projectContextRequested = true;
+				await new Promise<void>((resolve) => {
+					releaseProjectContext = resolve;
+				});
+				return { stdout: options?.cwd ?? cwd, code: 0 };
+			};
+			let compactionInProgress = true;
+			let boundaryError;
+			const originalSend = pi.sendUserMessage;
+			pi.sendUserMessage = (prompt, options) => {
+				if (compactionInProgress) throw new Error("Cannot submit a prompt while compaction is in progress.");
+				originalSend(prompt, options);
+			};
+			const goalPrompt = goalContinuationPrompt();
+			const dispatchGoalPrompt = () => {
+				try {
+					pi.sendUserMessage(goalPrompt, { deliverAs: "followUp" });
+					void pi.events.get("input")({ type: "input", text: goalPrompt, source: "extension" }, ctx);
+				} catch (error) {
+					boundaryError = error;
+				}
+				setTimeout(() => releaseProjectContext(), 0);
+			};
+			const compactionEventResult = {
+				fromExtension: true,
+				compactionEntry: {
+					id: "compact-goal-boundary",
+					summary: before.compaction.summary,
+					details: before.compaction.details,
+				},
+			};
+			let compactPromise;
+			if (order === "goal-first") {
+				setTimeout(dispatchGoalPrompt, 0);
+				compactPromise = pi.events.get("session_compact")(compactionEventResult, ctx);
+			} else {
+				compactPromise = pi.events.get("session_compact")(compactionEventResult, ctx);
+				setTimeout(dispatchGoalPrompt, 0);
+			}
+			await compactPromise;
+			assert.equal(projectContextRequested, false);
+			compactionInProgress = false;
+			for (let flush = 0; flush < 8; flush += 1) {
+				if (projectContextRequested) releaseProjectContext();
+				await flushHostCompaction();
+			}
+			assert.equal(boundaryError, undefined);
+			assert.deepEqual(pi.sent, [goalPrompt]);
+			assert.equal(existsSync(continuationArtifactPath(cwd)), true);
+			await pi.events.get("before_agent_start")({ prompt: goalPrompt }, ctx);
+			await pi.events.get("message_end")({ message: assistantMessage("stop") }, ctx);
+			goalMutex.release();
+		} finally {
+			faux.unregister();
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	}
+});
+
 test("a newer Goal iteration does not reuse a superseded pi-continue handoff", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-goal-iteration-race-"));
 	const faux = registerFauxProvider();
