@@ -13,6 +13,7 @@ import {
 	normalizeMidRunGuardAbortMessage,
 	parseContinuationRequest,
 	recordNativeCompactionAdoptionCheckpoint,
+	recordCompleteToolResultBatchAdoptionCheckpoint,
 	releaseAdoptedNativeCompaction,
 	runContinuationCommand,
 	settleAwaitingContinuationResumeFromAssistant,
@@ -105,14 +106,20 @@ test("parseContinuationRequest defaults to steer and preserves instructions", ()
 	assert.deepEqual(parseContinuationRequest("now focus auth"), { mode: "steer", instructions: "now focus auth" });
 });
 
-test("native adoption checkpoint is normal-stop-only and one-shot", () => {
+test("native adoption checkpoints distinguish normal stops from complete tool-result batches", () => {
 	const runtime = createContinuationRuntimeState();
 	recordNativeCompactionAdoptionCheckpoint(runtime, "toolUse");
 	assert.equal(runtime.nativeCompactionAdoptionCheckpoint, undefined);
-	recordNativeCompactionAdoptionCheckpoint(runtime, "stop");
-	const checkpoint = consumeNativeCompactionAdoptionCheckpoint(runtime);
-	assert.equal(checkpoint?.stopReason, "stop");
+	recordCompleteToolResultBatchAdoptionCheckpoint(runtime, false);
 	assert.equal(runtime.nativeCompactionAdoptionCheckpoint, undefined);
+	recordCompleteToolResultBatchAdoptionCheckpoint(runtime, true);
+	const toolUseCheckpoint = consumeNativeCompactionAdoptionCheckpoint(runtime);
+	assert.equal(toolUseCheckpoint?.stopReason, "toolUse");
+	assert.equal(toolUseCheckpoint?.boundary, "complete-tool-result-batch");
+	recordNativeCompactionAdoptionCheckpoint(runtime, "stop");
+	const stopCheckpoint = consumeNativeCompactionAdoptionCheckpoint(runtime);
+	assert.equal(stopCheckpoint?.stopReason, "stop");
+	assert.equal(stopCheckpoint?.boundary, "assistant-stop");
 	assert.equal(consumeNativeCompactionAdoptionCheckpoint(runtime), undefined);
 });
 

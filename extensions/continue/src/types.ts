@@ -217,10 +217,14 @@ export interface ContinuationEventStore {
 	nextEventSequence: number;
 }
 
-/** 证明原生阈值压缩紧随一次正常助手结束的一回合凭据。 */
+/** 原生采用凭据的边界类型；toolUse 只有在整批工具结果已落盘后才可用。 */
+export type NativeCompactionAdoptionCheckpointBoundary = "assistant-stop" | "complete-tool-result-batch";
+
+/** 证明原生阈值压缩紧随一个可验证的回合边界。 */
 export interface NativeCompactionAdoptionCheckpoint {
 	stopReason: string;
 	openedAt: number;
+	boundary?: NativeCompactionAdoptionCheckpointBoundary;
 }
 
 /** Persisted status for whether a compaction attempted a configured agent-guide replacement. */

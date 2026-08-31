@@ -180,7 +180,17 @@ export function recordNativeCompactionAdoptionCheckpoint(
 	stopReason: string,
 ): void {
 	runtime.nativeCompactionAdoptionCheckpoint = stopReason === "stop"
-		? { stopReason, openedAt: Date.now() }
+		? { stopReason, openedAt: Date.now(), boundary: "assistant-stop" }
+		: undefined;
+}
+
+/** 完整工具结果批次已落盘后，允许活动 toolUse 回合被原生阈值采用。 */
+export function recordCompleteToolResultBatchAdoptionCheckpoint(
+	runtime: ContinuationRuntimeState,
+	complete: boolean,
+): void {
+	runtime.nativeCompactionAdoptionCheckpoint = complete
+		? { stopReason: "toolUse", openedAt: Date.now(), boundary: "complete-tool-result-batch" }
 		: undefined;
 }
 

@@ -167,10 +167,13 @@ export function hasNativeCompactionPreparation(
 
 const NATIVE_ADOPTION_CHECKPOINT_TTL_MS = 30_000;
 
-/** 只接受紧随正常回合结束的 Pi 阈值压缩，排除手动与恢复压缩。 */
+/** 只接受紧随可验证回合边界的 Pi 阈值压缩，排除手动与恢复压缩。 */
 export function decideNativeCompactionAdoption(input: NativeCompactionAdoptionDecisionInput): boolean {
 	if (!input.config.enabled || !input.config.adoptNativeCompaction || !input.piSettings.enabled) return false;
-	if (!input.checkpoint || input.checkpoint.stopReason !== "stop") return false;
+	if (!input.checkpoint) return false;
+	const validBoundary = input.checkpoint.stopReason === "stop"
+		|| (input.checkpoint.stopReason === "toolUse" && input.checkpoint.boundary === "complete-tool-result-batch");
+	if (!validBoundary) return false;
 	if (input.reason !== "threshold" || input.willRetry !== false) return false;
 	if (!input.runActive || input.hasPendingMessages) return false;
 	if (!hasUsableContextWindow(input.contextWindow, input.piSettings.reserveTokens)) return false;

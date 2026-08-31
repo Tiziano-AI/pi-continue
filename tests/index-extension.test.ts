@@ -1926,6 +1926,51 @@ test("native threshold adoption synthesizes one owned handoff and dispatches one
 	}
 });
 
+test("native threshold adoption accepts a complete tool-result batch boundary", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-native-tool-batch-"));
+	const faux = registerFauxProvider();
+	try {
+		writeNativeAdoptionConfig(cwd);
+		faux.setResponses([fauxAssistantMessage(continuationArtifactJson())]);
+		const pi = createFakePi(cwd);
+		const ctx = createCommandContext(cwd, async () => undefined);
+		ctx.model = faux.models[0];
+		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test", headers: {} });
+		ctx.isIdle = () => false;
+		registerContinueExtension(pi);
+		const toolUseMessage = {
+			...assistantMessage("toolUse"),
+			content: [{ type: "toolCall", id: "tool-1", name: "bash", arguments: { command: "printf x" } }],
+		};
+		await pi.events.get("message_end")({ message: toolUseMessage }, ctx);
+		await pi.events.get("turn_end")({
+			message: toolUseMessage,
+			toolResults: [toolResultMessage("tool output", "tool-1")],
+		}, ctx);
+		const result = await pi.events.get("session_before_compact")(
+			compactionEvent({}, [], { reason: "threshold", willRetry: false }),
+			ctx,
+		);
+		assert.ok(result?.compaction);
+		assert.equal(result.compaction.details.continuationEventId, "continue-1");
+		assert.equal(ctx.compactCount, 0);
+		await pi.events.get("session_compact")({
+			fromExtension: true,
+			compactionEntry: {
+				id: "compact-tool-batch",
+				summary: result.compaction.summary,
+				details: result.compaction.details,
+			},
+		}, ctx);
+		await flushHostCompaction();
+		assert.deepEqual(pi.sent, [CONTINUATION_PROMPT]);
+		assert.deepEqual(pi.sentOptions, [{ deliverAs: "followUp" }]);
+	} finally {
+		faux.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("failed native threshold adoption releases ownership to Pi native compaction", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-continue-native-fallback-"));
 	const faux = registerFauxProvider();

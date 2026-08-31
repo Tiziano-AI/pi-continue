@@ -34,6 +34,7 @@ import { resolveProjectContext, writeNormalizedMarkdownFile } from "./src/projec
 import { isContinuationPromptUserMessage } from "./src/prompt-dispatch.ts";
 import { SHAKE_CONTINUATION_PROMPT } from "./src/continuation-prompt.ts";
 import { planMechanicalShake } from "./src/shake.ts";
+import { isCompleteToolResultBatch } from "./src/tool-batches.ts";
 import { showContinuePalette } from "./src/palette.ts";
 import { shouldDeferNativeThresholdCompaction } from "./src/threshold.ts";
 import {
@@ -52,6 +53,7 @@ import {
 	markContinuationCompactionComplete,
 	markContinuationCompactionRunMode,
 	normalizeMidRunGuardAbortMessage,
+	recordCompleteToolResultBatchAdoptionCheckpoint,
 	recordNativeCompactionAdoptionCheckpoint,
 	releaseAdoptedNativeCompaction,
 	releaseContinuationToNativeFallback,
@@ -497,7 +499,13 @@ export default function (pi: ExtensionAPI) {
 		if (message !== event.message) return { message };
 	});
 
-	pi.on("turn_end", async (_event, ctx) => {
+	pi.on("turn_end", async (event, ctx) => {
+		if (isAssistantMessage(event.message) && event.message.stopReason === "toolUse") {
+			recordCompleteToolResultBatchAdoptionCheckpoint(
+				runtime,
+				isCompleteToolResultBatch(event.message, event.toolResults),
+			);
+		}
 		await runPercentageThresholdGuard(pi, ctx, runtime, (eventId) => cleanupPendingOutputWrites(eventId));
 	});
 

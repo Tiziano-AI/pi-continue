@@ -142,9 +142,15 @@ test("decideNativeCompactionAdoption excludes manual, recovery, new-input, and q
 	assert.equal(decideNativeCompactionAdoption(adoptionInput({ hasPendingMessages: true })), false);
 });
 
-test("decideNativeCompactionAdoption requires a fresh normal-stop checkpoint and compactable preparation", () => {
+test("decideNativeCompactionAdoption requires a fresh supported boundary and compactable preparation", () => {
 	assert.equal(decideNativeCompactionAdoption(adoptionInput({ checkpoint: undefined })), false);
 	assert.equal(decideNativeCompactionAdoption(adoptionInput({ checkpoint: { stopReason: "toolUse", openedAt: 1000 } })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({
+		checkpoint: { stopReason: "toolUse", openedAt: 1000, boundary: "assistant-stop" },
+	})), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({
+		checkpoint: { stopReason: "toolUse", openedAt: 1000, boundary: "complete-tool-result-batch" },
+	})), true);
 	assert.equal(decideNativeCompactionAdoption(adoptionInput({ now: 31001 })), false);
 	assert.equal(decideNativeCompactionAdoption(adoptionInput({ now: 999 })), false);
 	assert.equal(decideNativeCompactionAdoption(adoptionInput({ contextWindow: undefined })), false);
