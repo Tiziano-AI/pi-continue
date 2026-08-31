@@ -1,5 +1,6 @@
 import type { Api, Model, ModelThinkingLevel, ThinkingLevel } from "@earendil-works/pi-ai";
-import { clampThinkingLevel, completeSimple } from "@earendil-works/pi-ai";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolveHistoryOutputBudget, resolveSummarizerModel } from "./model-settings.ts";
 import type { ContinuationConfig, ContinuationSynthesisFailureCode, PromptPassTelemetry } from "./types.ts";

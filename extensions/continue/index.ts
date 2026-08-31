@@ -26,7 +26,7 @@ import { SYNTHESIS_ABORT_MESSAGE } from "./src/synthesis-error.ts";
 import { buildLedgerSnapshot, createContinuationLedgerOverlayController } from "./src/ledger-viewer.ts";
 import { runMidRunGuard } from "./src/mid-run-guard.ts";
 import { PromptPassError, runPromptPass } from "./src/model.ts";
-import { loadPiInternals } from "./src/pi-internals.ts";
+import { prepareCompaction, renderConversationTranscript } from "./src/compaction-planning.ts";
 import { compileHistoryPrompt } from "./src/prompt.ts";
 import { resolveProjectContext, writeNormalizedMarkdownFile } from "./src/project.ts";
 import { isContinuationPromptUserMessage } from "./src/prompt-dispatch.ts";
@@ -221,13 +221,10 @@ export default function (pi: ExtensionAPI) {
 			isContinuationPromptUserMessage(message, CONTINUATION_PROMPT)
 		);
 		const fileOpsSnapshot = snapshotFileOperations(preparation.fileOps);
-		const internals = await loadPiInternals();
-		const ownerLostAfterInternals = ownerLostResult();
-		if (ownerLostAfterInternals) return ownerLostAfterInternals;
 		const messagesToSummarize = preparation.messagesToSummarize;
 		const turnPrefixMessages = preparation.turnPrefixMessages;
 		const turnPrefixTranscript = preparation.isSplitTurn && turnPrefixMessages.length > 0
-			? internals.serializeConversation(internals.convertToLlm(turnPrefixMessages))
+			? renderConversationTranscript(turnPrefixMessages)
 			: undefined;
 		const historyPrompt = compileHistoryPrompt(
 			loadHistoryPromptAssets(
@@ -241,7 +238,7 @@ export default function (pi: ExtensionAPI) {
 				agentGuidePath: resolvedProjectContext.agentGuidePath,
 				existingAgentGuide: resolvedProjectContext.existingAgentGuide,
 				previousSummary: preparation.previousSummary,
-				historyTranscript: internals.serializeConversation(internals.convertToLlm(messagesToSummarize)),
+				historyTranscript: renderConversationTranscript(messagesToSummarize),
 				turnPrefixTranscript,
 				customInstructions: event.customInstructions,
 				fileOps: fileOpsSnapshot,

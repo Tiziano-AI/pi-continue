@@ -44,9 +44,9 @@
     "gate": "pnpm run typecheck && pnpm test && pnpm run check:json && pnpm run check:pack"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.74.0",
-    "@earendil-works/pi-coding-agent": ">=0.74.0",
-    "@earendil-works/pi-tui": ">=0.74.0"
+    "@earendil-works/pi-ai": ">=0.84.0",
+    "@earendil-works/pi-coding-agent": ">=0.84.0",
+    "@earendil-works/pi-tui": ">=0.84.0"
   },
   "pi": {
     "extensions": [
@@ -55,9 +55,9 @@
     "image": "https://raw.githubusercontent.com/Tiziano-AI/pi-continue/v0.9.3/assets/gallery/pi-continue-gallery.webp"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.74.0",
-    "@earendil-works/pi-coding-agent": "^0.74.0",
-    "@earendil-works/pi-tui": "^0.74.0",
+    "@earendil-works/pi-ai": "^0.84.4",
+    "@earendil-works/pi-coding-agent": "^0.84.4",
+    "@earendil-works/pi-tui": "^0.84.4",
     "@types/node": "^25.6.1",
     "typescript": "^6.0.3"
   }

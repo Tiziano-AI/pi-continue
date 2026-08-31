@@ -5,7 +5,8 @@ export type ContinuationReasoning =
 	| "low"
 	| "medium"
 	| "high"
-	| "xhigh";
+	| "xhigh"
+	| "max";
 
 export type PromptOverridePolicy = "package-default" | "global-override" | "project-override";
 export type WriteMode = "always" | "off";

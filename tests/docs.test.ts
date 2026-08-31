@@ -43,7 +43,7 @@ test("README stays a front-facing product and operator guide", () => {
 	assert.match(readme, /When UI is unavailable, use `\/continue` or `\/continue steer\|queue` for direct continuation/);
 	assert.match(readme, /There are no command aliases/);
 	assert.match(readme, /AGENTS\.md sync remain off|[Aa]utomatic AGENTS\.md writes remain off by default/);
-	assert.match(readme, /Requires Pi `0\.74\.0` or newer/);
+	assert.match(readme, /Requires Pi `0\.84\.0` or newer/);
 	assert.doesNotMatch(readme, /unsafe model call/i);
 });
 
@@ -148,10 +148,10 @@ test("package metadata and package contents align with the public contract", () 
 		"examples/",
 		"extensions/",
 	]);
-	assert.equal(packageJson.peerDependencies["@earendil-works/pi-ai"], ">=0.74.0");
-	assert.equal(packageJson.peerDependencies["@earendil-works/pi-coding-agent"], ">=0.74.0");
-	assert.equal(packageJson.peerDependencies["@earendil-works/pi-tui"], ">=0.74.0");
-	assert.equal(packageJson.devDependencies["@earendil-works/pi-tui"], "^0.74.0");
+	assert.equal(packageJson.peerDependencies["@earendil-works/pi-ai"], ">=0.84.0");
+	assert.equal(packageJson.peerDependencies["@earendil-works/pi-coding-agent"], ">=0.84.0");
+	assert.equal(packageJson.peerDependencies["@earendil-works/pi-tui"], ">=0.84.0");
+	assert.equal(packageJson.devDependencies["@earendil-works/pi-tui"], "^0.84.4");
 	assert.deepEqual(packageJson.pi.extensions, ["./extensions/continue/index.ts"]);
 	assert.equal(packageJson.pi.image, "https://raw.githubusercontent.com/Tiziano-AI/pi-continue/v0.9.3/assets/gallery/pi-continue-gallery.webp");
 	assert.equal(existsSync("assets/gallery/pi-continue-gallery.webp"), true);
