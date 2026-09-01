@@ -6,11 +6,17 @@ import { loadPiInternals } from "./pi-internals.ts";
 import { resolveProjectContext } from "./project.ts";
 import { sendContinuationPrompt } from "./prompt-dispatch.ts";
 import { startContinuationCompaction, type ContinuationRuntimeState } from "./runtime.ts";
+import {
+	hasCrossedPiNativeCompactionThreshold,
+	hasReachedCompactionThreshold,
+	resolveCompactionThreshold,
+} from "./threshold.ts";
 import { endsWithCompleteToolResultBatch } from "./tool-batches.ts";
 import type {
 	ContextUsageEstimateSnapshot,
 	ContinuationConfig,
 	MidRunGuardTrigger,
+	NativeCompactionAdoptionCheckpoint,
 	PiCompactionSettings,
 } from "./types.ts";
 
@@ -19,6 +25,21 @@ export interface MidRunGuardDecisionInput {
 	piSettings: PiCompactionSettings;
 	contextWindow: number | undefined;
 	estimate: ContextUsageEstimateSnapshot;
+}
+
+export interface NativeCompactionAdoptionDecisionInput {
+	config: ContinuationConfig;
+	checkpoint: NativeCompactionAdoptionCheckpoint | undefined;
+	reason: string | undefined;
+	willRetry: boolean | undefined;
+	runActive: boolean;
+	hasPendingMessages: boolean;
+	contextWindow: number | undefined;
+	preparation: unknown | undefined;
+	branchEntries: unknown[];
+	piSettings: PiCompactionSettings;
+	estimateTokens: (message: unknown) => number;
+	now?: number;
 }
 
 interface BranchEntryRecord {
@@ -43,8 +64,9 @@ function hasUsableContextWindow(contextWindow: number | undefined, reserveTokens
 
 function buildNoCompactableGuardKey(trigger: MidRunGuardTrigger, piSettings: PiCompactionSettings): string {
 	return [
+		trigger.mode,
 		trigger.contextWindow,
-		trigger.reserveTokens,
+		trigger.mode === "reserve-tokens" ? trigger.reserveTokens : trigger.percentage,
 		trigger.thresholdTokens,
 		piSettings.keepRecentTokens,
 	].join(":");
@@ -143,6 +165,28 @@ export function hasNativeCompactionPreparation(
 	return normalized.messagesToSummarize.length > 0 || normalized.turnPrefixMessages.length > 0;
 }
 
+const NATIVE_ADOPTION_CHECKPOINT_TTL_MS = 30_000;
+
+/** 只接受紧随可验证回合边界的 Pi 阈值压缩，排除手动与恢复压缩。 */
+export function decideNativeCompactionAdoption(input: NativeCompactionAdoptionDecisionInput): boolean {
+	if (!input.config.enabled || !input.config.adoptNativeCompaction || !input.piSettings.enabled) return false;
+	if (!input.checkpoint) return false;
+	const validBoundary = input.checkpoint.stopReason === "stop"
+		|| (input.checkpoint.stopReason === "toolUse" && input.checkpoint.boundary === "complete-tool-result-batch");
+	if (!validBoundary) return false;
+	if (input.reason !== "threshold" || input.willRetry !== false) return false;
+	if (!input.runActive || input.hasPendingMessages) return false;
+	if (!hasUsableContextWindow(input.contextWindow, input.piSettings.reserveTokens)) return false;
+	const checkpointAge = (input.now ?? Date.now()) - input.checkpoint.openedAt;
+	if (checkpointAge < 0 || checkpointAge > NATIVE_ADOPTION_CHECKPOINT_TTL_MS) return false;
+	return hasNativeCompactionPreparation(
+		input.preparation,
+		input.branchEntries,
+		input.piSettings,
+		input.estimateTokens,
+	);
+}
+
 /** Decide whether a pre-provider context belongs to a completed assistant/tool-result loop. */
 export function shouldEvaluateMidRunContext(messages: unknown[]): boolean {
 	return endsWithCompleteToolResultBatch(messages);
@@ -151,18 +195,62 @@ export function shouldEvaluateMidRunContext(messages: unknown[]): boolean {
 /** Decide whether the package must stop before Pi sends another provider request. */
 export function decideMidRunGuardTrigger(input: MidRunGuardDecisionInput): MidRunGuardTrigger | undefined {
 	if (!input.config.enabled || !input.config.midRunGuardEnabled || !input.piSettings.enabled) return undefined;
-	if (!hasUsableContextWindow(input.contextWindow, input.piSettings.reserveTokens)) return undefined;
-	const thresholdTokens = input.contextWindow - input.piSettings.reserveTokens;
-	if (input.estimate.tokens <= thresholdTokens) return undefined;
+	const threshold = resolveCompactionThreshold(input.config, input.piSettings, input.contextWindow);
+	if (!threshold || !hasReachedCompactionThreshold(input.estimate.tokens, threshold)) return undefined;
 	return {
+		...threshold,
 		estimatedTokens: input.estimate.tokens,
-		thresholdTokens,
-		contextWindow: input.contextWindow,
-		reserveTokens: input.piSettings.reserveTokens,
 		usageTokens: input.estimate.usageTokens,
 		trailingTokens: input.estimate.trailingTokens,
 		lastUsageIndex: input.estimate.lastUsageIndex,
 	};
+}
+
+/** 只有宿主原生阈值已达到时才交给回合结束压缩，较早的自定义百分比仍走显式压缩。 */
+export function shouldDelegateMidRunCompactionToNative(
+	trigger: MidRunGuardTrigger,
+	piSettings: PiCompactionSettings,
+): boolean {
+	if (
+		!Number.isSafeInteger(piSettings.reserveTokens)
+		|| piSettings.reserveTokens <= 0
+		|| trigger.contextWindow <= piSettings.reserveTokens
+	) {
+		return false;
+	}
+	const nativeThresholdTokens = trigger.contextWindow - piSettings.reserveTokens;
+	return trigger.thresholdTokens > nativeThresholdTokens
+		|| trigger.estimatedTokens > nativeThresholdTokens;
+}
+
+async function startResolvedGuard(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	runtime: ContinuationRuntimeState,
+	trigger: MidRunGuardTrigger,
+	piSettings: PiCompactionSettings,
+	internals: Awaited<ReturnType<typeof loadPiInternals>>,
+	onContinuationFailed?: (eventId: string) => void,
+): Promise<void> {
+	// 自动守卫共享当前 handoff 的生命周期，重复事件不应再次中止运行或重复告警。
+	if (runtime.compactionRunning || runtime.pendingResumeDispatch !== undefined) return;
+	const branchEntries = ctx.sessionManager.getBranch();
+	const preparation = internals.prepareCompaction(branchEntries, piSettings);
+	if (!hasNativeCompactionPreparation(preparation, branchEntries, piSettings, internals.estimateTokens)) {
+		notifyNoCompactableSession(ctx, runtime, trigger, piSettings);
+		return;
+	}
+	runtime.lastNoCompactableGuardKey = undefined;
+	startContinuationCompaction(ctx, runtime, {
+		source: "mid-run-guard",
+		instructions: undefined,
+		trigger,
+		abortActiveRun: true,
+		continueAfterComplete: true,
+		deferToNativeCompaction: shouldDelegateMidRunCompactionToNative(trigger, piSettings),
+		sendContinuation: (prompt) => sendContinuationPrompt(pi, prompt),
+		onContinuationFailed,
+	});
 }
 
 /** Evaluate the awaited pre-provider guard after a complete assistant/tool-result batch. */
@@ -187,20 +275,37 @@ export async function runMidRunGuard(
 		estimate,
 	});
 	if (!trigger) return;
-	const branchEntries = ctx.sessionManager.getBranch();
-	const preparation = internals.prepareCompaction(branchEntries, piSettings);
-	if (!hasNativeCompactionPreparation(preparation, branchEntries, piSettings, internals.estimateTokens)) {
-		notifyNoCompactableSession(ctx, runtime, trigger, piSettings);
-		return;
-	}
-	runtime.lastNoCompactableGuardKey = undefined;
-	startContinuationCompaction(ctx, runtime, {
-		source: "mid-run-guard",
-		instructions: undefined,
-		trigger,
-		abortActiveRun: true,
-		continueAfterComplete: true,
-		sendContinuation: (prompt) => sendContinuationPrompt(pi, prompt),
-		onContinuationFailed,
-	});
+	await startResolvedGuard(pi, ctx, runtime, trigger, piSettings, internals, onContinuationFailed);
+}
+
+/** 百分比阈值不依赖共享 reserveTokens，并在 Pi 原生阈值更晚时于回合边界主动触发。 */
+export async function runPercentageThresholdGuard(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	runtime: ContinuationRuntimeState,
+	onContinuationFailed?: (eventId: string) => void,
+): Promise<void> {
+	if (!ctx.model) return;
+	const initialProjectContext = await resolveProjectContext(pi, ctx.cwd, ctx.sessionManager.getSessionId());
+	const config = loadContinuationConfig(initialProjectContext.projectRoot);
+	if (!config.enabled || config.compactionThresholdMode !== "percentage") return;
+	const piSettings = readEffectivePiCompactionSettings(initialProjectContext.projectRoot);
+	if (!piSettings.enabled) return;
+	const threshold = resolveCompactionThreshold(config, piSettings, ctx.model.contextWindow);
+	if (!threshold || threshold.mode !== "percentage") return;
+	const nativeThresholdTokens = ctx.model.contextWindow - piSettings.reserveTokens;
+	if (threshold.thresholdTokens > nativeThresholdTokens) return;
+	const contextTokens = ctx.getContextUsage()?.tokens;
+	if (contextTokens === null || contextTokens === undefined || !Number.isFinite(contextTokens)) return;
+	if (!hasReachedCompactionThreshold(contextTokens, threshold)) return;
+	if (hasCrossedPiNativeCompactionThreshold(contextTokens, piSettings, ctx.model.contextWindow)) return;
+	const trigger: MidRunGuardTrigger = {
+		...threshold,
+		estimatedTokens: contextTokens,
+		usageTokens: contextTokens,
+		trailingTokens: 0,
+		lastUsageIndex: null,
+	};
+	const internals = await loadPiInternals();
+	await startResolvedGuard(pi, ctx, runtime, trigger, piSettings, internals, onContinuationFailed);
 }

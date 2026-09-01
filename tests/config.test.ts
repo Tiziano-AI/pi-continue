@@ -3,7 +3,16 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_CONTINUE_CONFIG, loadContinuationConfig, loadScopeConfig, patchContinuationConfig, resetContinuationConfig, saveContinuationConfig } from "../extensions/continue/src/config.ts";
+import {
+	DEFAULT_CONTINUE_CONFIG,
+	NATIVE_ADOPTION_SYNTHESIS_TIMEOUT_MS,
+	loadContinuationConfig,
+	loadScopeConfig,
+	patchContinuationConfig,
+	resetContinuationConfig,
+	saveContinuationConfig,
+	withNativeAdoptionSynthesisTimeout,
+} from "../extensions/continue/src/config.ts";
 
 async function withTempAgent(work) {
 	const root = mkdtempSync(join(tmpdir(), "pi-continuation-config-"));
@@ -38,10 +47,43 @@ test("loadContinuationConfig uses current-session model, reasoning, guard, and o
 		assert.equal(config.agentGuidePath, "AGENTS.md");
 		assert.equal(config.agentGuideSyncMode, "off");
 		assert.equal(config.midRunGuardEnabled, true);
+		assert.equal(config.adoptNativeCompaction, false);
+		assert.equal(config.compactionThresholdMode, "reserve-tokens");
+		assert.equal(config.compactionThresholdPercent, 90);
 		assert.equal(config.appendCompactionMetadata, false);
 		assert.equal(config.appendReadFileTags, false);
 		assert.equal(config.appendModifiedFileTags, true);
-		assert.equal(config.showAfterCompact, true);
+		assert.equal(config.showAfterCompact, false);
+		assert.equal(config.shakeSummaryBudgetPercent, 75);
+	});
+});
+
+test("loadContinuationConfig preserves max reasoning", async () => {
+	await withTempAgent(async (root) => {
+		const configDir = join(root, ".pi", "extensions");
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ reasoning: "max" }), "utf8");
+		assert.equal(loadContinuationConfig(root).reasoning, "max");
+	});
+});
+
+test("loadContinuationConfig normalizes compaction threshold settings", async () => {
+	await withTempAgent(async (root) => {
+		const configDir = join(root, ".pi", "extensions");
+		mkdirSync(configDir, { recursive: true });
+		const configPath = join(configDir, "pi-continue.json");
+		writeFileSync(configPath, JSON.stringify({
+			compactionThresholdMode: "percentage",
+			compactionThresholdPercent: 92.5,
+		}), "utf8");
+		assert.equal(loadContinuationConfig(root).compactionThresholdMode, "percentage");
+		assert.equal(loadContinuationConfig(root).compactionThresholdPercent, 92.5);
+		writeFileSync(configPath, JSON.stringify({
+			compactionThresholdMode: "tokens",
+			compactionThresholdPercent: 100,
+		}), "utf8");
+		assert.equal(loadContinuationConfig(root).compactionThresholdMode, "reserve-tokens");
+		assert.equal(loadContinuationConfig(root).compactionThresholdPercent, 90);
 	});
 });
 
@@ -51,7 +93,7 @@ test("loadContinuationConfig ignores non-boolean showAfterCompact", async () => 
 		mkdirSync(configDir, { recursive: true });
 		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ showAfterCompact: "yes" }), "utf8");
 		const config = loadContinuationConfig(root);
-		assert.equal(config.showAfterCompact, true);
+		assert.equal(config.showAfterCompact, false);
 	});
 });
 
@@ -68,15 +110,38 @@ test("loadContinuationConfig normalizes synthesis timeout", async () => {
 	});
 });
 
-test("loadContinuationConfig preserves explicit mid-run guard false", async () => {
+test("loadContinuationConfig preserves explicit boolean settings", async () => {
 	await withTempAgent(async (root) => {
 		const configDir = join(root, ".pi", "extensions");
 		mkdirSync(configDir, { recursive: true });
-		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ midRunGuardEnabled: false, showAfterCompact: false }), "utf8");
+		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ midRunGuardEnabled: false, showAfterCompact: true }), "utf8");
 		const config = loadContinuationConfig(root);
 		assert.equal(config.midRunGuardEnabled, false);
-		assert.equal(config.showAfterCompact, false);
+		assert.equal(config.showAfterCompact, true);
 	});
+});
+
+test("loadContinuationConfig preserves explicit native compaction adoption opt-in", async () => {
+	await withTempAgent(async (root) => {
+		const configDir = join(root, ".pi", "extensions");
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ adoptNativeCompaction: true }), "utf8");
+		assert.equal(loadContinuationConfig(root).adoptNativeCompaction, true);
+		writeFileSync(join(configDir, "pi-continue.json"), JSON.stringify({ adoptNativeCompaction: "yes" }), "utf8");
+		assert.equal(loadContinuationConfig(root).adoptNativeCompaction, false);
+	});
+});
+
+test("native compaction adoption caps synthesis independently at 180 seconds", () => {
+	assert.equal(NATIVE_ADOPTION_SYNTHESIS_TIMEOUT_MS, 180000);
+	assert.equal(withNativeAdoptionSynthesisTimeout({
+		...DEFAULT_CONTINUE_CONFIG,
+		synthesisTimeoutMs: 600000,
+	}).synthesisTimeoutMs, 180000);
+	assert.equal(withNativeAdoptionSynthesisTimeout({
+		...DEFAULT_CONTINUE_CONFIG,
+		synthesisTimeoutMs: 2500,
+	}).synthesisTimeoutMs, 2500);
 });
 
 test("loadContinuationConfig preserves explicit artifact and agent guide settings while ignoring retired document keys", async () => {
@@ -121,10 +186,10 @@ test("patchContinuationConfig preserves inherited global settings", async () => 
 			...DEFAULT_CONTINUE_CONFIG,
 			enabled: false,
 		});
-		await patchContinuationConfig("project", root, { showAfterCompact: false });
+		await patchContinuationConfig("project", root, { showAfterCompact: true });
 		const effective = loadContinuationConfig(root);
 		assert.equal(effective.enabled, false);
-		assert.equal(effective.showAfterCompact, false);
+		assert.equal(effective.showAfterCompact, true);
 	});
 });
 
@@ -142,13 +207,23 @@ test("save and reset round-trip the mid-run guard setting", async () => {
 		await saveContinuationConfig("project", root, {
 			...DEFAULT_CONTINUE_CONFIG,
 			midRunGuardEnabled: false,
+			adoptNativeCompaction: true,
+			compactionThresholdMode: "percentage",
+			compactionThresholdPercent: 87.5,
 			synthesisTimeoutMs: 2500,
 		});
 		assert.equal(loadContinuationConfig(root).midRunGuardEnabled, false);
+		assert.equal(loadContinuationConfig(root).adoptNativeCompaction, true);
+		assert.equal(loadContinuationConfig(root).compactionThresholdMode, "percentage");
+		assert.equal(loadContinuationConfig(root).compactionThresholdPercent, 87.5);
 		await resetContinuationConfig("project", root);
 		assert.equal(loadContinuationConfig(root).midRunGuardEnabled, true);
+		assert.equal(loadContinuationConfig(root).adoptNativeCompaction, false);
+		assert.equal(loadContinuationConfig(root).compactionThresholdMode, "reserve-tokens");
+		assert.equal(loadContinuationConfig(root).compactionThresholdPercent, 90);
 		assert.equal(loadContinuationConfig(root).synthesisTimeoutMs, 180000);
 		assert.equal(loadContinuationConfig(root).continuationArtifactMode, "always");
 		assert.equal(loadContinuationConfig(root).agentGuideSyncMode, "off");
+		assert.equal(loadContinuationConfig(root).showAfterCompact, false);
 	});
 });

@@ -4,6 +4,22 @@ All notable changes to `pi-continue` are documented here.
 
 ## Unreleased
 
+### Added
+
+- Added backward-compatible fixed reserve-token and per-session current-model percentage modes for automatic compaction thresholds, selectable from `/continue settings` and visible in status and the action palette.
+
+### Changed
+
+- Disabled the post-compaction Continuation Ledger panel by default; `showAfterCompact: true` remains available globally or per project for operators who want the rendered brief to open automatically.
+
+### Fixed
+
+- Made the context mid-run guard the sole owner of its intentional abort and deferred compaction: duplicate automatic guard events now yield silently, and Pi sees the owned assistant outcome as aborted before its native post-turn threshold check.
+- Prevented the percentage guard from scheduling a second compaction after Pi's strict native threshold was already crossed, and kept a matching saved handoff authoritative over a delayed compaction error callback.
+- Kept percentage threshold coordination out of shared Pi `reserveTokens`, while preserving native manual compaction and overflow recovery behavior.
+- Made the artifact-write and threshold integration fixtures independent of machine-global continuation settings.
+- Made the documentation and package validation gate portable across CRLF checkouts and Windows command execution.
+
 ## 0.9.3 - 2026-07-08
 
 ### Changed

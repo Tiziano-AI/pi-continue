@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
 	decideMidRunGuardTrigger,
+	decideNativeCompactionAdoption,
 	hasNativeCompactionPreparation,
+	shouldDelegateMidRunCompactionToNative,
 	shouldEvaluateMidRunContext,
 } from "../extensions/continue/src/mid-run-guard.ts";
 
@@ -12,10 +14,14 @@ function config(overrides = {}) {
 		summarizerModel: "inherit",
 		reasoning: "inherit",
 		historyMaxTokens: null,
+		synthesisTimeoutMs: 180000,
 		continuationArtifactMode: "always",
 		agentGuidePath: "AGENTS.md",
 		agentGuideSyncMode: "off",
 		midRunGuardEnabled: true,
+		adoptNativeCompaction: false,
+		compactionThresholdMode: "reserve-tokens",
+		compactionThresholdPercent: 90,
 		appendCompactionMetadata: true,
 		appendReadFileTags: false,
 		appendModifiedFileTags: true,
@@ -93,6 +99,65 @@ function nativePreparation(overrides = {}) {
 	};
 }
 
+function adoptionInput(overrides = {}) {
+	const piSettings = { enabled: true, reserveTokens: 20, keepRecentTokens: 10 };
+	return {
+		config: config({ adoptNativeCompaction: true }),
+		checkpoint: { stopReason: "stop", openedAt: 1000 },
+		reason: "threshold",
+		willRetry: false,
+		runActive: true,
+		hasPendingMessages: false,
+		contextWindow: 100,
+		preparation: nativePreparation({ messagesToSummarize: [userMessage()] }),
+		branchEntries: [],
+		piSettings,
+		estimateTokens: () => 1000,
+		now: 1001,
+		...overrides,
+	};
+}
+
+test("decideNativeCompactionAdoption accepts one immediate natural threshold compaction", () => {
+	assert.equal(decideNativeCompactionAdoption(adoptionInput()), true);
+});
+
+test("decideNativeCompactionAdoption requires the explicit package opt-in", () => {
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({
+		config: config({ adoptNativeCompaction: false }),
+	})), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({
+		config: config({ enabled: false, adoptNativeCompaction: true }),
+	})), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({
+		piSettings: { enabled: false, reserveTokens: 20, keepRecentTokens: 10 },
+	})), false);
+});
+
+test("decideNativeCompactionAdoption excludes manual, recovery, new-input, and queued-message compactions", () => {
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ reason: "manual" })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ reason: "overflow", willRetry: true })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ willRetry: true })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ runActive: false })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ hasPendingMessages: true })), false);
+});
+
+test("decideNativeCompactionAdoption requires a fresh supported boundary and compactable preparation", () => {
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ checkpoint: undefined })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ checkpoint: { stopReason: "toolUse", openedAt: 1000 } })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({
+		checkpoint: { stopReason: "toolUse", openedAt: 1000, boundary: "assistant-stop" },
+	})), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({
+		checkpoint: { stopReason: "toolUse", openedAt: 1000, boundary: "complete-tool-result-batch" },
+	})), true);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ now: 31001 })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ now: 999 })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ contextWindow: undefined })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ preparation: false })), false);
+	assert.equal(decideNativeCompactionAdoption(adoptionInput({ preparation: nativePreparation() })), false);
+});
+
 test("shouldEvaluateMidRunContext only accepts contexts ending in a complete assistant/tool-result batch", () => {
 	assert.equal(shouldEvaluateMidRunContext([{ role: "user" }]), false);
 	assert.equal(shouldEvaluateMidRunContext([userMessage(), assistantMessage("call-a")]), false);
@@ -117,6 +182,7 @@ test("decideMidRunGuardTrigger ignores disabled branches", () => {
 test("decideMidRunGuardTrigger only trips above the reserve threshold", () => {
 	assert.equal(decideMidRunGuardTrigger(input({ estimate: { tokens: 80, usageTokens: 70, trailingTokens: 10, lastUsageIndex: 3 } })), undefined);
 	assert.deepEqual(decideMidRunGuardTrigger(input()), {
+		mode: "reserve-tokens",
 		estimatedTokens: 81,
 		thresholdTokens: 80,
 		contextWindow: 100,
@@ -125,6 +191,85 @@ test("decideMidRunGuardTrigger only trips above the reserve threshold", () => {
 		trailingTokens: 11,
 		lastUsageIndex: 3,
 	});
+});
+
+test("mid-run delegation only uses the host native threshold boundary", () => {
+	assert.equal(shouldDelegateMidRunCompactionToNative({
+		mode: "reserve-tokens",
+		estimatedTokens: 81,
+		thresholdTokens: 80,
+		contextWindow: 100,
+		reserveTokens: 20,
+		usageTokens: 81,
+		trailingTokens: 0,
+		lastUsageIndex: 3,
+	}, { enabled: true, reserveTokens: 20, keepRecentTokens: 10 }), true);
+	assert.equal(shouldDelegateMidRunCompactionToNative({
+		mode: "percentage",
+		percentage: 80,
+		estimatedTokens: 80,
+		thresholdTokens: 80,
+		contextWindow: 100,
+		usageTokens: 80,
+		trailingTokens: 0,
+		lastUsageIndex: 3,
+	}, { enabled: true, reserveTokens: 20, keepRecentTokens: 10 }), false);
+	assert.equal(shouldDelegateMidRunCompactionToNative({
+		mode: "percentage",
+		percentage: 80,
+		estimatedTokens: 81,
+		thresholdTokens: 80,
+		contextWindow: 100,
+		usageTokens: 81,
+		trailingTokens: 0,
+		lastUsageIndex: 3,
+	}, { enabled: true, reserveTokens: 20, keepRecentTokens: 10 }), true);
+	assert.equal(shouldDelegateMidRunCompactionToNative({
+		mode: "percentage",
+		percentage: 70,
+		estimatedTokens: 70,
+		thresholdTokens: 70,
+		contextWindow: 100,
+		usageTokens: 70,
+		trailingTokens: 0,
+		lastUsageIndex: 3,
+	}, { enabled: true, reserveTokens: 20, keepRecentTokens: 10 }), false);
+});
+
+test("decideMidRunGuardTrigger recomputes percentage thresholds for the current model", () => {
+	const percentageConfig = config({
+		compactionThresholdMode: "percentage",
+		compactionThresholdPercent: 90,
+	});
+	assert.equal(decideMidRunGuardTrigger(input({
+		config: percentageConfig,
+		contextWindow: 100,
+		estimate: { tokens: 89, usageTokens: 89, trailingTokens: 0, lastUsageIndex: 3 },
+	})), undefined);
+	assert.deepEqual(decideMidRunGuardTrigger(input({
+		config: percentageConfig,
+		contextWindow: 1000,
+		estimate: { tokens: 900, usageTokens: 900, trailingTokens: 0, lastUsageIndex: 4 },
+	})), {
+		mode: "percentage",
+		percentage: 90,
+		thresholdTokens: 900,
+		contextWindow: 1000,
+		estimatedTokens: 900,
+		usageTokens: 900,
+		trailingTokens: 0,
+		lastUsageIndex: 4,
+	});
+	assert.equal(decideMidRunGuardTrigger(input({
+		config: percentageConfig,
+		contextWindow: 258000,
+		estimate: { tokens: 232200, usageTokens: 232200, trailingTokens: 0, lastUsageIndex: 5 },
+	}))?.thresholdTokens, 232200);
+	assert.equal(decideMidRunGuardTrigger(input({
+		config: percentageConfig,
+		contextWindow: 1000000,
+		estimate: { tokens: 900000, usageTokens: 900000, trailingTokens: 0, lastUsageIndex: 6 },
+	}))?.thresholdTokens, 900000);
 });
 
 test("hasNativeCompactionPreparation rejects Pi's false no-preparation sentinel", () => {

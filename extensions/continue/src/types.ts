@@ -1,16 +1,30 @@
-export type ContinuationReasoning =
-	| "inherit"
-	| "off"
-	| "minimal"
-	| "low"
-	| "medium"
-	| "high"
-	| "xhigh";
+export const CONTINUATION_REASONING_LEVELS = [
+	"inherit",
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+] as const;
+
+export type ContinuationReasoning = (typeof CONTINUATION_REASONING_LEVELS)[number];
+export type ContinuationModelThinkingLevel = Exclude<ContinuationReasoning, "inherit">;
+
+export function isContinuationReasoning(value: string): value is ContinuationReasoning {
+	return CONTINUATION_REASONING_LEVELS.some((level) => level === value);
+}
+
+export function isContinuationModelThinkingLevel(value: string): value is ContinuationModelThinkingLevel {
+	return value !== "inherit" && isContinuationReasoning(value);
+}
 
 export type PromptOverridePolicy = "package-default" | "global-override" | "project-override";
 export type WriteMode = "always" | "off";
 export type ConfigScope = "global" | "project";
 export type HistoryScenario = "initial" | "update";
+export type CompactionThresholdMode = "reserve-tokens" | "percentage";
 
 export interface ContinuationConfig {
 	enabled: boolean;
@@ -22,11 +36,19 @@ export interface ContinuationConfig {
 	agentGuidePath: string;
 	agentGuideSyncMode: WriteMode;
 	midRunGuardEnabled: boolean;
+	adoptNativeCompaction: boolean;
+	compactionThresholdMode: CompactionThresholdMode;
+	compactionThresholdPercent: number;
 	appendCompactionMetadata: boolean;
 	appendReadFileTags: boolean;
 	appendModifiedFileTags: boolean;
 	promptOverridePolicy: PromptOverridePolicy;
 	showAfterCompact: boolean;
+	shakeEnabled: boolean;
+	shakeThresholdTokens: number;
+	shakeMinSavingsTokens: number;
+	shakeProtectedToolCalls: number;
+	shakeSummaryBudgetPercent: number;
 }
 
 export interface ResolvedProjectContext {
@@ -80,7 +102,8 @@ export interface ParsedHistoryArtifacts {
 	agentGuideChangeReason: string;
 }
 
-export type ContinuationEventSource = "command-steer" | "command-queue" | "mid-run-guard";
+export type ContinuationEventSource = "command-steer" | "command-queue" | "mid-run-guard" | "adopted-compaction";
+export type ContinuationResumeOwner = "pi-continue" | "cooperative-workflow";
 export type ContinuationEventStatus = "running" | "completed" | "failed" | "blocked";
 export type ContinuationArtifactStatus = "pending" | "modeled" | "aborted";
 export type ContinuationPromptStatus = "pending" | "sent" | "not-requested" | "failed";
@@ -184,12 +207,24 @@ export interface ContinuationLatestEvent {
 	synthesis?: ContinuationSynthesisTelemetry;
 	synthesisFailure?: ContinuationSynthesisFailure;
 	failureReason?: string;
+	/** 标记该 handoff 由机械摇树路径生成（未经过 LLM 合成）。 */
+	shaken?: boolean;
 }
 
 export interface ContinuationEventStore {
 	latestEvent: ContinuationLatestEvent | undefined;
 	activeEventId: string | undefined;
 	nextEventSequence: number;
+}
+
+/** 原生采用凭据的边界类型；toolUse 只有在整批工具结果已落盘后才可用。 */
+export type NativeCompactionAdoptionCheckpointBoundary = "assistant-stop" | "complete-tool-result-batch";
+
+/** 证明原生阈值压缩紧随一个可验证的回合边界。 */
+export interface NativeCompactionAdoptionCheckpoint {
+	stopReason: string;
+	openedAt: number;
+	boundary?: NativeCompactionAdoptionCheckpointBoundary;
 }
 
 /** Persisted status for whether a compaction attempted a configured agent-guide replacement. */
@@ -244,12 +279,25 @@ export interface ContextUsageEstimateSnapshot {
 	lastUsageIndex: number | null;
 }
 
-export interface MidRunGuardTrigger {
-	estimatedTokens: number;
+export interface ReserveTokenThreshold {
+	mode: "reserve-tokens";
 	thresholdTokens: number;
 	contextWindow: number;
 	reserveTokens: number;
+}
+
+export interface PercentageThreshold {
+	mode: "percentage";
+	thresholdTokens: number;
+	contextWindow: number;
+	percentage: number;
+}
+
+export type ResolvedCompactionThreshold = ReserveTokenThreshold | PercentageThreshold;
+
+export type MidRunGuardTrigger = ResolvedCompactionThreshold & {
+	estimatedTokens: number;
 	usageTokens: number;
 	trailingTokens: number;
 	lastUsageIndex: number | null;
-}
+};

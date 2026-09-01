@@ -1,7 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { isContinuationReasoning } from "./types.ts";
 import type {
+	CompactionThresholdMode,
 	ConfigScope,
 	ContinuationConfig,
 	ContinuationReasoning,
@@ -10,22 +12,15 @@ import type {
 } from "./types.ts";
 import { resolveAgentDir } from "./agent-dir.ts";
 
-const REASONING_LEVELS = new Set<ContinuationReasoning>([
-	"inherit",
-	"off",
-	"minimal",
-	"low",
-	"medium",
-	"high",
-	"xhigh",
-]);
 const PROMPT_OVERRIDE_POLICIES = new Set<PromptOverridePolicy>([
 	"package-default",
 	"global-override",
 	"project-override",
 ]);
 const WRITE_MODES = new Set<WriteMode>(["always", "off"]);
+const COMPACTION_THRESHOLD_MODES = new Set<CompactionThresholdMode>(["reserve-tokens", "percentage"]);
 const DEFAULT_SYNTHESIS_TIMEOUT_MS = 180_000;
+export const NATIVE_ADOPTION_SYNTHESIS_TIMEOUT_MS = 180_000;
 const mutationQueues = new Map<string, Promise<void>>();
 
 async function withConfigMutationQueue(path: string, work: () => Promise<void>): Promise<void> {
@@ -49,11 +44,19 @@ export const DEFAULT_CONTINUE_CONFIG: ContinuationConfig = {
 	agentGuidePath: "AGENTS.md",
 	agentGuideSyncMode: "off",
 	midRunGuardEnabled: true,
+	adoptNativeCompaction: false,
+	compactionThresholdMode: "reserve-tokens",
+	compactionThresholdPercent: 90,
 	appendCompactionMetadata: false,
 	appendReadFileTags: false,
 	appendModifiedFileTags: true,
 	promptOverridePolicy: "project-override",
-	showAfterCompact: true,
+	showAfterCompact: false,
+	shakeEnabled: true,
+	shakeThresholdTokens: 1000,
+	shakeMinSavingsTokens: 10000,
+	shakeProtectedToolCalls: 15,
+	shakeSummaryBudgetPercent: 75,
 };
 
 interface PartialContinuationConfig {
@@ -66,11 +69,19 @@ interface PartialContinuationConfig {
 	agentGuidePath?: string;
 	agentGuideSyncMode?: string;
 	midRunGuardEnabled?: boolean;
+	adoptNativeCompaction?: boolean;
+	compactionThresholdMode?: string;
+	compactionThresholdPercent?: number;
 	appendCompactionMetadata?: boolean;
 	appendReadFileTags?: boolean;
 	appendModifiedFileTags?: boolean;
 	promptOverridePolicy?: string;
 	showAfterCompact?: boolean;
+	shakeEnabled?: boolean;
+	shakeThresholdTokens?: number;
+	shakeMinSavingsTokens?: number;
+	shakeProtectedToolCalls?: number;
+	shakeSummaryBudgetPercent?: number;
 }
 
 export interface ContinuationConfigPatch {
@@ -83,6 +94,9 @@ export interface ContinuationConfigPatch {
 	agentGuidePath?: string;
 	agentGuideSyncMode?: WriteMode;
 	midRunGuardEnabled?: boolean;
+	adoptNativeCompaction?: boolean;
+	compactionThresholdMode?: CompactionThresholdMode;
+	compactionThresholdPercent?: number;
 	appendCompactionMetadata?: boolean;
 	appendReadFileTags?: boolean;
 	appendModifiedFileTags?: boolean;
@@ -132,6 +146,12 @@ function parsePartialConfig(value: unknown): PartialContinuationConfig {
 	if (agentGuideSyncMode !== undefined) result.agentGuideSyncMode = agentGuideSyncMode;
 	const midRunGuardEnabled = asBoolean(value.midRunGuardEnabled);
 	if (midRunGuardEnabled !== undefined) result.midRunGuardEnabled = midRunGuardEnabled;
+	const adoptNativeCompaction = asBoolean(value.adoptNativeCompaction);
+	if (adoptNativeCompaction !== undefined) result.adoptNativeCompaction = adoptNativeCompaction;
+	const compactionThresholdMode = asString(value.compactionThresholdMode);
+	if (compactionThresholdMode !== undefined) result.compactionThresholdMode = compactionThresholdMode;
+	const compactionThresholdPercent = asNumber(value.compactionThresholdPercent);
+	if (compactionThresholdPercent !== undefined) result.compactionThresholdPercent = compactionThresholdPercent;
 	const appendCompactionMetadata = asBoolean(value.appendCompactionMetadata);
 	if (appendCompactionMetadata !== undefined) result.appendCompactionMetadata = appendCompactionMetadata;
 	const appendReadFileTags = asBoolean(value.appendReadFileTags);
@@ -142,6 +162,16 @@ function parsePartialConfig(value: unknown): PartialContinuationConfig {
 	if (promptOverridePolicy !== undefined) result.promptOverridePolicy = promptOverridePolicy;
 	const showAfterCompact = asBoolean(value.showAfterCompact);
 	if (showAfterCompact !== undefined) result.showAfterCompact = showAfterCompact;
+	const shakeEnabled = asBoolean(value.shakeEnabled);
+	if (shakeEnabled !== undefined) result.shakeEnabled = shakeEnabled;
+	const shakeThresholdTokens = asNumber(value.shakeThresholdTokens);
+	if (shakeThresholdTokens !== undefined) result.shakeThresholdTokens = shakeThresholdTokens;
+	const shakeMinSavingsTokens = asNumber(value.shakeMinSavingsTokens);
+	if (shakeMinSavingsTokens !== undefined) result.shakeMinSavingsTokens = shakeMinSavingsTokens;
+	const shakeProtectedToolCalls = asNumber(value.shakeProtectedToolCalls);
+	if (shakeProtectedToolCalls !== undefined) result.shakeProtectedToolCalls = shakeProtectedToolCalls;
+	const shakeSummaryBudgetPercent = asNumber(value.shakeSummaryBudgetPercent);
+	if (shakeSummaryBudgetPercent !== undefined) result.shakeSummaryBudgetPercent = shakeSummaryBudgetPercent;
 	return result;
 }
 
@@ -159,8 +189,8 @@ function readPartialConfig(path: string): PartialContinuationConfig {
 }
 
 function normalizeReasoning(value: string | undefined): ContinuationReasoning {
-	return value !== undefined && REASONING_LEVELS.has(value as ContinuationReasoning)
-		? (value as ContinuationReasoning)
+	return value !== undefined && isContinuationReasoning(value)
+		? value
 		: DEFAULT_CONTINUE_CONFIG.reasoning;
 }
 
@@ -174,6 +204,18 @@ function normalizeWriteMode(value: string | undefined, fallback: WriteMode): Wri
 	return value !== undefined && WRITE_MODES.has(value as WriteMode)
 		? (value as WriteMode)
 		: fallback;
+}
+
+function normalizeCompactionThresholdMode(value: string | undefined): CompactionThresholdMode {
+	return value !== undefined && COMPACTION_THRESHOLD_MODES.has(value as CompactionThresholdMode)
+		? (value as CompactionThresholdMode)
+		: DEFAULT_CONTINUE_CONFIG.compactionThresholdMode;
+}
+
+function normalizeCompactionThresholdPercent(value: number | undefined): number {
+	return value !== undefined && value > 0 && value < 100
+		? value
+		: DEFAULT_CONTINUE_CONFIG.compactionThresholdPercent;
 }
 
 function normalizePath(value: string | undefined, fallback: string): string {
@@ -192,6 +234,14 @@ function normalizeSummarizerModel(value: string | undefined): string {
 	return trimmed && trimmed.length > 0 ? trimmed : DEFAULT_CONTINUE_CONFIG.summarizerModel;
 }
 
+function normalizePositiveNumber(value: number | undefined, fallback: number): number {
+	return value !== undefined && Number.isFinite(value) && value > 0 ? Math.round(value) : fallback;
+}
+
+function normalizePercent(value: number | undefined, fallback: number): number {
+	return value !== undefined && Number.isFinite(value) && value > 0 && value < 100 ? value : fallback;
+}
+
 function normalizeConfig(partial: PartialContinuationConfig): ContinuationConfig {
 	return {
 		enabled: partial.enabled ?? DEFAULT_CONTINUE_CONFIG.enabled,
@@ -203,12 +253,26 @@ function normalizeConfig(partial: PartialContinuationConfig): ContinuationConfig
 		agentGuidePath: normalizePath(partial.agentGuidePath, DEFAULT_CONTINUE_CONFIG.agentGuidePath),
 		agentGuideSyncMode: normalizeWriteMode(partial.agentGuideSyncMode, DEFAULT_CONTINUE_CONFIG.agentGuideSyncMode),
 		midRunGuardEnabled: partial.midRunGuardEnabled ?? DEFAULT_CONTINUE_CONFIG.midRunGuardEnabled,
+		adoptNativeCompaction: partial.adoptNativeCompaction ?? DEFAULT_CONTINUE_CONFIG.adoptNativeCompaction,
+		compactionThresholdMode: normalizeCompactionThresholdMode(partial.compactionThresholdMode),
+		compactionThresholdPercent: normalizeCompactionThresholdPercent(partial.compactionThresholdPercent),
 		appendCompactionMetadata: partial.appendCompactionMetadata ?? DEFAULT_CONTINUE_CONFIG.appendCompactionMetadata,
 		appendReadFileTags: partial.appendReadFileTags ?? DEFAULT_CONTINUE_CONFIG.appendReadFileTags,
 		appendModifiedFileTags: partial.appendModifiedFileTags ?? DEFAULT_CONTINUE_CONFIG.appendModifiedFileTags,
 		promptOverridePolicy: normalizePromptOverridePolicy(partial.promptOverridePolicy),
 		showAfterCompact: partial.showAfterCompact ?? DEFAULT_CONTINUE_CONFIG.showAfterCompact,
+		shakeEnabled: partial.shakeEnabled ?? DEFAULT_CONTINUE_CONFIG.shakeEnabled,
+		shakeThresholdTokens: normalizePositiveNumber(partial.shakeThresholdTokens, DEFAULT_CONTINUE_CONFIG.shakeThresholdTokens),
+		shakeMinSavingsTokens: normalizePositiveNumber(partial.shakeMinSavingsTokens, DEFAULT_CONTINUE_CONFIG.shakeMinSavingsTokens),
+		shakeProtectedToolCalls: normalizePositiveNumber(partial.shakeProtectedToolCalls, DEFAULT_CONTINUE_CONFIG.shakeProtectedToolCalls),
+		shakeSummaryBudgetPercent: normalizePercent(partial.shakeSummaryBudgetPercent, DEFAULT_CONTINUE_CONFIG.shakeSummaryBudgetPercent),
 	};
+}
+
+/** 将原生采用的尝试限制在固定窗口内，避免阻塞 Pi 自己的摘要器。 */
+export function withNativeAdoptionSynthesisTimeout(config: ContinuationConfig): ContinuationConfig {
+	if (config.synthesisTimeoutMs <= NATIVE_ADOPTION_SYNTHESIS_TIMEOUT_MS) return config;
+	return { ...config, synthesisTimeoutMs: NATIVE_ADOPTION_SYNTHESIS_TIMEOUT_MS };
 }
 
 export function getGlobalConfigPath(): string {

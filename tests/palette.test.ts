@@ -43,11 +43,25 @@ test("ContinuePaletteComponent renders a compact action palette", () => {
 	assert.match(text, /Show ledger/);
 	assert.match(text, /Project settings/);
 	assert.match(text, /Reset project/);
+	assert.match(text, /handoff at 127,000/);
 	assert.match(text, /Effect: Stops the current assistant turn if needed before saving/);
 	assert.match(text, /Up\/Down choose \| Enter select \| f note \| Esc close/);
 	assert.doesNotMatch(text, /Project: \/tmp\/project/);
 	assert.equal(lines.length, 18);
 	assertLineWidths(lines, 96);
+});
+
+test("ContinuePaletteComponent renders percentage mode with its current-model token threshold", () => {
+	const component = new ContinuePaletteComponent(createSnapshot({
+		config: {
+			...DEFAULT_CONTINUE_CONFIG,
+			compactionThresholdMode: "percentage",
+			compactionThresholdPercent: 90,
+		},
+		threshold: "90% / 115,200",
+	}), theme, () => {}, () => {});
+	const text = stripAnsi(component.render(96).join("\n"));
+	assert.match(text, /handoff at 90% \/ 115,200/);
 });
 
 test("ContinuePaletteComponent keeps palette height stable while browsing", () => {

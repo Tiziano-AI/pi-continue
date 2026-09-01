@@ -3,6 +3,7 @@ import { loadContinuationConfig } from "./config.ts";
 import { keyMatches, palettePrintableInput, paletteShortcutMatches } from "./key-input.ts";
 import { readEffectivePiCompactionSettings } from "./pi-settings.ts";
 import { resolveProjectContext } from "./project.ts";
+import { resolveCompactionThreshold } from "./threshold.ts";
 import type { ContinuationRuntimeState } from "./runtime.ts";
 import { padVisible, truncateAnsi, visibleWidth } from "./tui-text.ts";
 import type { ContinuationConfig } from "./types.ts";
@@ -111,9 +112,11 @@ function renderFocusField(draft: FocusDraft, maxWidth: number): string {
 	return `[${padVisible(value, available)}]`;
 }
 
-function renderThreshold(contextWindow: number | undefined, reserveTokens: number): string {
-	if (!contextWindow || !Number.isFinite(contextWindow) || contextWindow <= reserveTokens) return "unavailable";
-	return `${(contextWindow - reserveTokens).toLocaleString()} tokens`;
+function renderThreshold(config: ContinuationConfig, contextWindow: number | undefined, reserveTokens: number): string {
+	const threshold = resolveCompactionThreshold(config, { reserveTokens }, contextWindow);
+	if (!threshold) return "unavailable";
+	if (threshold.mode === "percentage") return `${threshold.percentage}% / ${threshold.thresholdTokens.toLocaleString()}`;
+	return `${threshold.thresholdTokens.toLocaleString()} tokens`;
 }
 
 function renderUsage(ctx: ExtensionCommandContext): string {
@@ -131,7 +134,7 @@ async function buildPaletteSnapshot(pi: ExtensionAPI, ctx: ExtensionCommandConte
 	return {
 		enabled: config.enabled,
 		config,
-		threshold: renderThreshold(contextWindow, compaction.reserveTokens),
+		threshold: renderThreshold(config, contextWindow, compaction.reserveTokens),
 		contextUsage: renderUsage(ctx),
 		compactionRunning: runtime.compactionRunning,
 	};

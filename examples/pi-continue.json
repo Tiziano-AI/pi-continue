@@ -8,9 +8,17 @@
   "agentGuidePath": "AGENTS.md",
   "agentGuideSyncMode": "off",
   "midRunGuardEnabled": true,
+  "adoptNativeCompaction": false,
+  "compactionThresholdMode": "reserve-tokens",
+  "compactionThresholdPercent": 90,
   "appendCompactionMetadata": false,
   "appendReadFileTags": false,
   "appendModifiedFileTags": true,
   "promptOverridePolicy": "project-override",
-  "showAfterCompact": true
+  "showAfterCompact": false,
+  "shakeEnabled": true,
+  "shakeThresholdTokens": 1000,
+  "shakeMinSavingsTokens": 10000,
+  "shakeProtectedToolCalls": 15,
+  "shakeSummaryBudgetPercent": 75
 }

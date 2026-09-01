@@ -1,16 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { markActiveContinuationArtifact } from "../extensions/continue/src/continuation-event.ts";
+import { markActiveContinuationArtifact, recordActiveSynthesisFailure } from "../extensions/continue/src/continuation-event.ts";
 import {
 	CONTINUATION_PROMPT,
 	acceptContinuationCompactionProof,
+	completeContinuationCompactionFromHost,
 	armDeferredResumeStartTimeout,
+	consumeNativeCompactionAdoptionCheckpoint,
 	createContinuationRuntimeState,
 	failRunningAwaitingContinuationResume,
 	markAwaitingContinuationResumeStarted,
+	normalizeMidRunGuardAbortMessage,
 	parseContinuationRequest,
+	recordNativeCompactionAdoptionCheckpoint,
+	recordCompleteToolResultBatchAdoptionCheckpoint,
+	releaseAdoptedNativeCompaction,
 	runContinuationCommand,
 	settleAwaitingContinuationResumeFromAssistant,
+	startAdoptedNativeCompaction,
 	startContinuationCompaction,
 } from "../extensions/continue/src/runtime.ts";
 
@@ -51,6 +58,7 @@ function bindContext(owner) {
 }
 
 const trigger = {
+	mode: "reserve-tokens",
 	estimatedTokens: 120,
 	thresholdTokens: 100,
 	contextWindow: 128,
@@ -60,9 +68,14 @@ const trigger = {
 	lastUsageIndex: 3,
 };
 
-function completeAndVerify(owner, ctx, runtime, eventId = "continue-1", compactionId = "compact-1") {
+async function flushResumeDispatch(): Promise<void> {
+	await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
+async function completeAndVerify(owner, ctx, runtime, eventId = "continue-1", compactionId = "compact-1") {
 	owner.compactOptions.onComplete({});
 	acceptContinuationCompactionProof(ctx, runtime, eventId, compactionId);
+	await flushResumeDispatch();
 }
 
 test("receiver prompt frames the agent as its own amnesiac continuer with a factual authority boundary", () => {
@@ -93,7 +106,141 @@ test("parseContinuationRequest defaults to steer and preserves instructions", ()
 	assert.deepEqual(parseContinuationRequest("now focus auth"), { mode: "steer", instructions: "now focus auth" });
 });
 
-test("stale assistant message_end cannot settle resume before start proof", () => {
+test("native adoption checkpoints distinguish normal stops from complete tool-result batches", () => {
+	const runtime = createContinuationRuntimeState();
+	recordNativeCompactionAdoptionCheckpoint(runtime, "toolUse");
+	assert.equal(runtime.nativeCompactionAdoptionCheckpoint, undefined);
+	recordCompleteToolResultBatchAdoptionCheckpoint(runtime, false);
+	assert.equal(runtime.nativeCompactionAdoptionCheckpoint, undefined);
+	recordCompleteToolResultBatchAdoptionCheckpoint(runtime, true);
+	const toolUseCheckpoint = consumeNativeCompactionAdoptionCheckpoint(runtime);
+	assert.equal(toolUseCheckpoint?.stopReason, "toolUse");
+	assert.equal(toolUseCheckpoint?.boundary, "complete-tool-result-batch");
+	recordNativeCompactionAdoptionCheckpoint(runtime, "stop");
+	const stopCheckpoint = consumeNativeCompactionAdoptionCheckpoint(runtime);
+	assert.equal(stopCheckpoint?.stopReason, "stop");
+	assert.equal(stopCheckpoint?.boundary, "assistant-stop");
+	assert.equal(consumeNativeCompactionAdoptionCheckpoint(runtime), undefined);
+});
+
+test("mid-run guard abort normalization is scoped to active ownership", () => {
+	const abortError = {
+		role: "assistant",
+		provider: "openai",
+		model: "gpt-test",
+		content: [{ type: "toolCall", id: "partial-call", name: "bash", arguments: { command: "printf unsafe" } }],
+		usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		stopReason: "error",
+		errorMessage: "This operation was aborted",
+		timestamp: 0,
+	};
+	const providerError = { ...abortError, errorMessage: "Provider connection failed" };
+	const idleRuntime = createContinuationRuntimeState();
+	assert.equal(normalizeMidRunGuardAbortMessage(idleRuntime, abortError), abortError);
+
+	const manualOwner = createContext(false);
+	const manualCtx = bindContext(manualOwner);
+	const manualRuntime = createContinuationRuntimeState();
+	startContinuationCompaction(manualCtx, manualRuntime, {
+		source: "command-steer",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: true,
+		continueAfterComplete: false,
+		sendContinuation() {},
+	});
+	assert.equal(normalizeMidRunGuardAbortMessage(manualRuntime, abortError), abortError);
+	manualOwner.compactOptions.onComplete({});
+
+	const successOwner = createContext(false);
+	const successCtx = bindContext(successOwner);
+	const successRuntime = createContinuationRuntimeState();
+	startContinuationCompaction(successCtx, successRuntime, {
+		source: "mid-run-guard",
+		instructions: undefined,
+		trigger,
+		abortActiveRun: true,
+		continueAfterComplete: false,
+		sendContinuation() {},
+	});
+	assert.equal(normalizeMidRunGuardAbortMessage(successRuntime, providerError), providerError);
+	const normalized = normalizeMidRunGuardAbortMessage(successRuntime, abortError);
+	assert.notEqual(normalized, abortError);
+	assert.equal(normalized.stopReason, "stop");
+	assert.deepEqual(normalized.content, []);
+	assert.equal(normalized.errorMessage, undefined);
+	assert.equal(normalizeMidRunGuardAbortMessage(successRuntime, abortError), abortError);
+	successOwner.compactOptions.onComplete({});
+	assert.equal(normalizeMidRunGuardAbortMessage(successRuntime, abortError), abortError);
+
+	const failureOwner = createContext(false);
+	const failureCtx = bindContext(failureOwner);
+	const failureRuntime = createContinuationRuntimeState();
+	startContinuationCompaction(failureCtx, failureRuntime, {
+		source: "mid-run-guard",
+		instructions: undefined,
+		trigger,
+		abortActiveRun: true,
+		continueAfterComplete: false,
+		sendContinuation() {},
+	});
+	failureOwner.compactOptions.onError(new Error("failed"));
+	assert.equal(normalizeMidRunGuardAbortMessage(failureRuntime, abortError), abortError);
+});
+
+test("mid-run native delegation aborts once and resumes after the host proof", async () => {
+	const owner = createContext(false);
+	const ctx = bindContext(owner);
+	const runtime = createContinuationRuntimeState();
+	const continuations = [];
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "mid-run-guard",
+		instructions: undefined,
+		trigger,
+		abortActiveRun: true,
+		continueAfterComplete: true,
+		deferToNativeCompaction: true,
+		sendContinuation: (prompt) => continuations.push(prompt),
+	});
+	assert.equal(started, true);
+	assert.equal(owner.aborts, 1);
+	assert.equal(owner.compactOptions, undefined);
+	assert.equal(runtime.compactionRunning, true);
+	assert.equal(runtime.controlledMidRunAbortRequested, true);
+	assert.equal(completeContinuationCompactionFromHost(ctx, runtime, "continue-1"), false);
+	assert.equal(acceptContinuationCompactionProof(ctx, runtime, "continue-1", "compact-1"), true);
+	assert.equal(completeContinuationCompactionFromHost(ctx, runtime, "continue-1"), true);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
+	assert.equal(runtime.compactionRunning, false);
+});
+
+test("adopted native compaction owns lifecycle without invoking compact or abort", () => {
+	const owner = createContext(false);
+	const ctx = bindContext(owner);
+	const runtime = createContinuationRuntimeState();
+	const failedEvents = [];
+	const eventId = startAdoptedNativeCompaction(ctx, runtime, {
+		sendContinuation() {},
+		onContinuationFailed: (failedEventId) => failedEvents.push(failedEventId),
+	});
+	assert.equal(eventId, "continue-1");
+	assert.equal(owner.aborts, 0);
+	assert.equal(owner.compactOptions, undefined);
+	assert.equal(runtime.latestEvent?.source, "adopted-compaction");
+	assert.equal(runtime.latestEvent?.status, "running");
+	assert.equal(runtime.pendingResumeDispatch?.eventId, "continue-1");
+	assert.equal(releaseAdoptedNativeCompaction(ctx, runtime, eventId, "fallback", (failedEventId) => {
+		failedEvents.push(failedEventId);
+	}), true);
+	assert.deepEqual(failedEvents, ["continue-1"]);
+	assert.equal(runtime.activeEventId, undefined);
+	assert.equal(runtime.pendingResumeDispatch, undefined);
+	assert.equal(runtime.latestEvent?.status, "failed");
+	assert.equal(runtime.latestEvent?.failureReason, "fallback");
+});
+
+test("stale assistant message_end cannot settle resume before start proof", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -107,7 +254,7 @@ test("stale assistant message_end cannot settle resume before start proof", () =
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	const stale = settleAwaitingContinuationResumeFromAssistant(runtime, {
 		role: "assistant",
 		provider: "openai",
@@ -123,7 +270,7 @@ test("stale assistant message_end cannot settle resume before start proof", () =
 	assert.equal(runtime.awaitingResumeEventId, "continue-1");
 });
 
-test("agent-end resume failure requires start proof", () => {
+test("agent-end resume failure requires start proof", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -137,7 +284,7 @@ test("agent-end resume failure requires start proof", () => {
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.equal(failRunningAwaitingContinuationResume(runtime, "Continuation resume did not produce an assistant response."), undefined);
 	assert.equal(runtime.latestEvent?.status, "running");
 	assert.equal(markAwaitingContinuationResumeStarted(runtime), "continue-1");
@@ -149,7 +296,7 @@ test("agent-end resume failure requires start proof", () => {
 	assert.equal(runtime.awaitingResumeEventId, undefined);
 });
 
-test("resume proof stays running while the resumed assistant requests tools", () => {
+test("resume proof stays running while the resumed assistant requests tools", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -163,7 +310,7 @@ test("resume proof stays running while the resumed assistant requests tools", ()
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.equal(markAwaitingContinuationResumeStarted(runtime), "continue-1");
 	const settlement = settleAwaitingContinuationResumeFromAssistant(runtime, {
 		role: "assistant",
@@ -180,7 +327,7 @@ test("resume proof stays running while the resumed assistant requests tools", ()
 	assert.equal(runtime.awaitingResumeEventId, "continue-1");
 });
 
-test("mid-run guard can chain after a resumed assistant tool-use turn", () => {
+test("mid-run guard can chain after a resumed assistant tool-use turn", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -194,7 +341,7 @@ test("mid-run guard can chain after a resumed assistant tool-use turn", () => {
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(first, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.equal(markAwaitingContinuationResumeStarted(runtime), "continue-1");
 	const toolUseSettlement = settleAwaitingContinuationResumeFromAssistant(runtime, {
 		role: "assistant",
@@ -215,7 +362,7 @@ test("mid-run guard can chain after a resumed assistant tool-use turn", () => {
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(guard, true);
-	assert.equal(owner.aborts, 1);
+	assert.equal(owner.aborts, 0);
 	assert.equal(runtime.latestEvent?.id, "continue-2");
 	assert.equal(runtime.latestEvent?.status, "running");
 	assert.equal(runtime.latestEvent?.resume.status, "not-requested");
@@ -252,7 +399,7 @@ test("mid-run guard stops over-limit request while handoff is already saving", (
 	assert.equal(continuations.length, 0);
 });
 
-test("pending resume blocks new continuation without clobbering active state", () => {
+test("pending resume blocks new continuation without clobbering active state", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -266,7 +413,7 @@ test("pending resume blocks new continuation without clobbering active state", (
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(first, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.equal(runtime.activeEventId, "continue-1");
 	assert.equal(runtime.awaitingResumeEventId, "continue-1");
 	const second = startContinuationCompaction(ctx, runtime, {
@@ -285,7 +432,7 @@ test("pending resume blocks new continuation without clobbering active state", (
 	assert.equal(continuations.length, 1);
 });
 
-test("mid-run guard stops over-limit request while preserving pending resume", () => {
+test("mid-run guard stops over-limit request while preserving pending resume", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -299,7 +446,7 @@ test("mid-run guard stops over-limit request while preserving pending resume", (
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(first, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	const guard = startContinuationCompaction(ctx, runtime, {
 		source: "mid-run-guard",
 		instructions: undefined,
@@ -317,7 +464,7 @@ test("mid-run guard stops over-limit request while preserving pending resume", (
 	assert.equal(continuations.length, 1);
 });
 
-test("duplicate compaction terminal callbacks cannot double-send or fail pending resume", () => {
+test("duplicate compaction terminal callbacks cannot double-send or fail pending resume", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -333,7 +480,7 @@ test("duplicate compaction terminal callbacks cannot double-send or fail pending
 		onContinuationFailed: (eventId) => failedEvents.push(eventId),
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	owner.compactOptions.onComplete({});
 	owner.compactOptions.onError(new Error("provider failed"));
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
@@ -361,7 +508,7 @@ test("resume start timeout settles idle prompt dispatch that never starts", asyn
 		resumeStartTimeoutMs: 0,
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
 	assert.deepEqual(failedEvents, ["continue-1"]);
@@ -389,7 +536,7 @@ test("queued follow-up resume can start after the parent turn remains active", a
 		resumeStartTimeoutMs: 0,
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
 	assert.deepEqual(failedEvents, []);
@@ -428,7 +575,7 @@ test("queued follow-up resume start timeout arms after the active parent turn en
 		resumeStartTimeoutMs: 0,
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.equal(armDeferredResumeStartTimeout(ctx, runtime), true);
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
@@ -456,6 +603,73 @@ test("compaction error preserves synthesis hard-fail reason", () => {
 	owner.compactOptions.onError(new Error("compact failed"));
 	assert.equal(runtime.latestEvent?.status, "failed");
 	assert.equal(runtime.latestEvent?.failureReason, "pi-continue could not create a usable handoff, so continuation stopped before resuming.");
+});
+
+test("handoff failure notification exposes the recorded synthesis classifier", () => {
+	const owner = createContext(false);
+	const ctx = bindContext(owner);
+	ctx.hasUI = true;
+	const notifications = [];
+	ctx.ui.notify = (message, type) => {
+		notifications.push([message, type]);
+	};
+	ctx.ui.setWorkingMessage = () => {};
+	ctx.ui.setWorkingIndicator = () => {};
+	ctx.ui.theme = { fg: () => "" };
+	const runtime = createContinuationRuntimeState();
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "command-steer",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: true,
+		continueAfterComplete: true,
+		sendContinuation: () => {},
+	});
+	assert.equal(started, true);
+	recordActiveSynthesisFailure(runtime, {
+		kind: "model-provider-call",
+		code: "provider-error",
+		pass: "history",
+		requestedModel: "tokenrhythm/deepseek-v4-pro",
+		httpStatus: 429,
+	});
+	markActiveContinuationArtifact(runtime, "aborted", "pi-continue could not create a usable handoff, so continuation stopped before resuming.");
+	owner.compactOptions.onError(new Error("compact failed"));
+	assert.equal(runtime.latestEvent?.status, "failed");
+	const failureNotify = notifications.find(([message]) => message.includes("handoff failed"));
+	assert.ok(failureNotify);
+	assert.match(failureNotify[0], /provider error/);
+	assert.match(failureNotify[0], /HTTP 429/);
+	assert.match(failureNotify[0], /requested tokenrhythm\/deepseek-v4-pro/);
+});
+
+test("handoff failure notification falls back to fixed copy without a classifier", () => {
+	const owner = createContext(false);
+	const ctx = bindContext(owner);
+	ctx.hasUI = true;
+	const notifications = [];
+	ctx.ui.notify = (message, type) => {
+		notifications.push([message, type]);
+	};
+	ctx.ui.setWorkingMessage = () => {};
+	ctx.ui.setWorkingIndicator = () => {};
+	ctx.ui.theme = { fg: () => "" };
+	const runtime = createContinuationRuntimeState();
+	const started = startContinuationCompaction(ctx, runtime, {
+		source: "command-steer",
+		instructions: undefined,
+		trigger: undefined,
+		abortActiveRun: true,
+		continueAfterComplete: true,
+		sendContinuation: () => {},
+	});
+	assert.equal(started, true);
+	markActiveContinuationArtifact(runtime, "aborted", "pi-continue could not create a usable handoff, so continuation stopped before resuming.");
+	owner.compactOptions.onError(new Error("compact failed"));
+	assert.equal(runtime.latestEvent?.status, "failed");
+	const failureNotify = notifications.find(([message]) => message.includes("handoff failed"));
+	assert.ok(failureNotify);
+	assert.match(failureNotify[0], /could not create a usable handoff/);
 });
 
 test("failed guard records a failure key and blocks identical retries", () => {
@@ -486,12 +700,12 @@ test("failed guard records a failure key and blocks identical retries", () => {
 		sendContinuation: (prompt) => continuations.push(prompt),
 	});
 	assert.equal(retry, false);
-	assert.equal(owner.aborts, 2);
+	assert.equal(owner.aborts, 1);
 	assert.equal(runtime.latestEvent?.status, "blocked");
 	assert.equal(runtime.latestEvent?.failureReason, "Repeated over-limit retry was blocked after a failed continuation.");
 });
 
-test("prompt dispatch failure settles the latest event", () => {
+test("prompt dispatch failure settles the latest event", async () => {
 	const owner = createContext(true);
 	const ctx = bindContext(owner);
 	const runtime = createContinuationRuntimeState();
@@ -506,7 +720,7 @@ test("prompt dispatch failure settles the latest event", () => {
 		},
 	});
 	assert.equal(started, true);
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.equal(runtime.compactionRunning, false);
 	assert.equal(runtime.activeEventId, undefined);
 	assert.equal(runtime.latestEvent?.status, "failed");
@@ -563,6 +777,6 @@ test("runContinuationCommand queue waits for idle before compaction", async () =
 	assert.equal(owner.waits, 1);
 	assert.equal(owner.aborts, 0);
 	assert.equal(owner.compactOptions.customInstructions, "finish validation");
-	completeAndVerify(owner, ctx, runtime);
+	await completeAndVerify(owner, ctx, runtime);
 	assert.deepEqual(continuations, [CONTINUATION_PROMPT]);
 });

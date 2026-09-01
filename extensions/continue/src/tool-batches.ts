@@ -62,6 +62,10 @@ function hasUniqueValues(values: string[]): boolean {
 	return new Set(values).size === values.length;
 }
 
+export function isCompleteToolResultBatch(assistantMessage: unknown, toolResults: unknown[]): boolean {
+	return toolResultIdsMatchAssistant(toolResults, assistantMessage);
+}
+
 /** Decide whether messages end at one complete assistant/tool-result batch. */
 export function endsWithCompleteToolResultBatch(messages: unknown[]): boolean {
 	if (messageRole(messages[messages.length - 1]) !== "toolResult") return false;

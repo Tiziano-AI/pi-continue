@@ -1,6 +1,7 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { resolveHistoryOutputBudget, resolveSummarizerModel } from "./model-settings.ts";
 import { readEffectivePiCompactionSettings } from "./pi-settings.ts";
+import { describeCompactionThreshold, resolveCompactionThreshold } from "./threshold.ts";
 import type {
 	ContinuationConfig,
 	ContinuationLatestEvent,
@@ -44,10 +45,9 @@ function renderConfiguredOutputBudget(config: ContinuationConfig, ctx: Extension
 	return renderResolvedOutputBudget(budget);
 }
 
-function renderSharedCompactionThreshold(ctx: ExtensionCommandContext, reserveTokens: number): string {
-	const contextWindow = ctx.model?.contextWindow;
-	if (!contextWindow || !Number.isFinite(contextWindow) || contextWindow <= reserveTokens) return "unavailable";
-	return `${(contextWindow - reserveTokens).toLocaleString()} tokens`;
+function renderSharedCompactionThreshold(ctx: ExtensionCommandContext, config: ContinuationConfig, reserveTokens: number): string {
+	const threshold = resolveCompactionThreshold(config, { reserveTokens }, ctx.model?.contextWindow);
+	return threshold ? describeCompactionThreshold(threshold) : "unavailable";
 }
 
 function formatTimestamp(value: number | undefined): string {
@@ -56,6 +56,7 @@ function formatTimestamp(value: number | undefined): string {
 }
 
 function sourceLabel(event: ContinuationLatestEvent): string {
+	if (event.source === "adopted-compaction") return "adopted Pi threshold compaction";
 	if (event.source === "mid-run-guard") return "automatic continuation";
 	if (event.source === "command-queue") return "queued /continue";
 	return "/continue steer";
@@ -94,15 +95,16 @@ function statusLabel(event: ContinuationLatestEvent): string {
 }
 
 function renderTrigger(event: ContinuationLatestEvent): string {
+	if (event.source === "adopted-compaction") return "Pi natural end-of-turn threshold";
 	if (!event.trigger) return "manual request";
 	return [
 		`${event.trigger.estimatedTokens.toLocaleString()}/${event.trigger.contextWindow.toLocaleString()} estimated tokens`,
-		`threshold ${event.trigger.thresholdTokens.toLocaleString()}`,
-		`reserve ${event.trigger.reserveTokens.toLocaleString()}`,
+		`threshold ${describeCompactionThreshold(event.trigger)}`,
 	].join(", ");
 }
 
 function renderSafeBoundary(event: ContinuationLatestEvent): string {
+	if (event.source === "adopted-compaction") return "normal assistant completion immediately before Pi's threshold compaction";
 	if (event.source === "mid-run-guard") return "completed assistant/tool-result batch before the next model request";
 	if (event.source === "command-queue") return "waited until Pi was idle before saving the handoff";
 	return "requested by user; the current assistant turn stops first when needed";
@@ -274,6 +276,9 @@ export function renderStatus(
 		`- Agent guide updates: ${config.agentGuideSyncMode}`,
 		`- Agent guide writes: ${config.agentGuideSyncMode === "always" ? "full replacement only" : "off"}`,
 		`- Automatic mid-run continuation: ${config.midRunGuardEnabled ? "yes" : "no"}`,
+		`- Compaction threshold mode: ${config.compactionThresholdMode}`,
+		`- Effective handoff trigger: ${renderSharedCompactionThreshold(ctx, config, piCompactionSettings.reserveTokens)}`,
+		`- Adopt native threshold compaction: ${config.adoptNativeCompaction ? "yes" : "no"} (synthesis timeout cap 180,000 ms)`,
 		`- Append compaction metadata: ${config.appendCompactionMetadata ? "yes" : "no"}`,
 		`- Append read file tags: ${config.appendReadFileTags ? "yes" : "no"}`,
 		`- Append modified file tags: ${config.appendModifiedFileTags ? "yes" : "no"}`,
@@ -283,7 +288,7 @@ export function renderStatus(
 		`## Pi Core Compaction`,
 		`- Enabled: ${piCompactionSettings.enabled ? "yes" : "no"}`,
 		`- Reserve tokens: ${piCompactionSettings.reserveTokens}`,
-		`- Trigger: ${renderSharedCompactionThreshold(ctx, piCompactionSettings.reserveTokens)}`,
+		`- Native trigger: ${renderSharedCompactionThreshold(ctx, { ...config, compactionThresholdMode: "reserve-tokens" }, piCompactionSettings.reserveTokens)}`,
 		`- Keep recent: ${piCompactionSettings.keepRecentTokens}`,
 		``,
 		`## What Can Change`,
