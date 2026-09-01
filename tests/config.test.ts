@@ -54,6 +54,7 @@ test("loadContinuationConfig uses current-session model, reasoning, guard, and o
 		assert.equal(config.appendReadFileTags, false);
 		assert.equal(config.appendModifiedFileTags, true);
 		assert.equal(config.showAfterCompact, false);
+		assert.equal(config.shakeSummaryBudgetPercent, 75);
 	});
 });
 

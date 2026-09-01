@@ -56,7 +56,7 @@ export const DEFAULT_CONTINUE_CONFIG: ContinuationConfig = {
 	shakeThresholdTokens: 1000,
 	shakeMinSavingsTokens: 10000,
 	shakeProtectedToolCalls: 15,
-	shakeSummaryBudgetPercent: 20,
+	shakeSummaryBudgetPercent: 75,
 };
 
 interface PartialContinuationConfig {

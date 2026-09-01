@@ -20,5 +20,5 @@
   "shakeThresholdTokens": 1000,
   "shakeMinSavingsTokens": 10000,
   "shakeProtectedToolCalls": 15,
-  "shakeSummaryBudgetPercent": 20
+  "shakeSummaryBudgetPercent": 75
 }

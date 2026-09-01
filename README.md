@@ -147,7 +147,7 @@ Default package config:
   "shakeThresholdTokens": 1000,
   "shakeMinSavingsTokens": 10000,
   "shakeProtectedToolCalls": 15,
-  "shakeSummaryBudgetPercent": 20
+  "shakeSummaryBudgetPercent": 75
 }
 ```
 
@@ -172,6 +172,7 @@ Common settings:
 | `appendModifiedFileTags` | `true` by default; when true, appends current compaction modified-file tags. |
 | `promptOverridePolicy` | Chooses project overrides, global overrides, or package defaults. |
 | `showAfterCompact` | `false` by default for a silent handoff; set `true` to surface the rendered brief in a temporary TUI panel after each successful extension-owned compaction. Repeated displays update and focus the latest panel instead of stacking overlays. |
+| `shakeSummaryBudgetPercent` | Maximum percentage of the context window that the mechanically shaken history skeleton may use; defaults to `75`. |
 
 `/continue settings` includes a threshold-mode selector and a handoff-trigger editor. Fixed reserve-token mode shows a token count and writes Pi core `compaction.reserveTokens` in `.pi/settings.json` or the global Pi settings file. Percentage mode shows both the configured percentage and the token threshold for the current model, and writes only the package config.
 

@@ -149,12 +149,12 @@ test("shake plan falls back when the skeleton exceeds the budget percent", () =>
 	try {
 		withAgentDir(agentDir, () => {
 			const entries = [
-				branchMessageEntry("user-0", { role: "user", content: [{ type: "text", text: "a".repeat(4000) }], timestamp: 0 }),
+				branchMessageEntry("user-0", { role: "user", content: [{ type: "text", text: "a".repeat(12000) }], timestamp: 0 }),
 				...toolRounds(20, 5),
 			];
 			const plan = planMechanicalShake({
-				// 上下文 4000 tokens，预算 20% = 800 tokens；骨架里的 user 长文本已超。
-				config: shakeConfig(),
+				// 上下文 4000 tokens，预算 75% = 3000 tokens；骨架里的 user 长文本已超。
+				config: shakeConfig({ shakeSummaryBudgetPercent: 75 }),
 				entries,
 				contextWindow: 4000,
 				cwd: "cwd",
